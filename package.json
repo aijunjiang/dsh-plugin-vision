@@ -1,0 +1,53 @@
+{
+  "name": "dsh-plugin-vision",
+  "version": "0.1.0",
+  "description": "给 DSH agent 装一双眼睛：调用在线 VLM（多供应商、OpenAI 兼容）分析本地图片、URL 与会话上传的附件；勾选的模型特色能力会实时注入系统提示",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./catalog": "./catalog.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "catalog.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "sync": "node scripts/sync-catalog.mjs",
+    "check": "node --check index.js && node --check catalog.js && node --check client.js && node scripts/sync-catalog.mjs --check"
+  },
+  "license": "MIT",
+  "keywords": [
+    "dsh-plugin",
+    "vision",
+    "vlm",
+    "multimodal",
+    "ocr",
+    "grounding"
+  ],
+  "dependencies": {
+    "@deepseek-ai/schemastery": "0.1.2-alpha.3"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-settings": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

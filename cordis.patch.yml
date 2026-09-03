@@ -1,0 +1,10 @@
+# dsh-plugin-vision —— bundle 补丁层。
+# 作为「包内 bundle patch」分发时使用包名行（dsh plugin add 之后自动成为 profile 层）。
+# 本机/开发态也可以把这段 insert 原样放进 profile 的 cordis.patch.yml，并把 name 换成
+# 指向本仓库 index.js 的路径（见仓库 README 的「本地热装载」小节）。
+- insert:
+    - id: vision
+      name: dsh-plugin-vision
+      config:
+        provider: ark
+        apiKeyEnv: ARK_API_KEY

@@ -1,0 +1,15 @@
+# 依赖
+node_modules/
+
+# 日志 / 系统垃圾 / 缓存
+*.log
+.DS_Store
+*.tgz
+__pycache__/
+*.pyc
+
+# 本地安装备份（openviking 等工具产生的）
+.ov-install-backup/
+
+# 本地联调用的临时素材
+.tmp-test/
