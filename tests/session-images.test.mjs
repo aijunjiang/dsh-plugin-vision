@@ -197,4 +197,20 @@ test('切换供应商会改变段落里的模型名与能力说明', () => {
   assert.ok(ark !== zhipu, '不同供应商应产生不同提示词')
 })
 
+test('传图纪律三条都写进提示词，且与能力勾选无关', () => {
+  // 一条都不勾也必须出现——这是调用方式的地基，不是可选能力
+  const text = buildPromptSection(withDefaults({ provider: 'ark', capabilities: [] }))
+  // 1. 别起局域网图片服务
+  assert.match(text, /不要为了「给模型一个 URL」去起本地或局域网图片服务/u)
+  assert.match(text, /127\.0\.0\.1/u)
+  assert.match(text, /192\.168/u)
+  // 2. 远端设备先取回本地
+  assert.match(text, /先取回本地再传本地路径/u)
+  // 3. 别自己读 base64
+  assert.match(text, /不要自己读图片的 base64/u)
+  assert.match(text, /挤占上下文/u)
+  // 并给出正确做法
+  assert.match(text, /直接把本地路径写进 images/u)
+})
+
 console.log(`\n✅ ${passed} 项断言全部通过`)

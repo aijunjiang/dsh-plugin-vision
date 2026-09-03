@@ -137,6 +137,16 @@ Each entry of `images` may be:
 No parameters. Lists every image attachment seen in this conversation (name, size, type, digest) so
 an agent staring at `[image omitted …]` still knows which images exist and how to name one.
 
+### How images should reach the model (in the system prompt, and enforced at runtime)
+
+| Don't | Do | Why |
+| --- | --- | --- |
+| Stand up a local/LAN image server and hand `http://192.168.1.7/a.png` to an online model | Put the local path straight into `images` | **The VLM runs on the public internet and cannot reach your intranet.** The plugin rejects private hosts before the request goes out (`127.0.0.1`, `localhost`, `10.x`, `192.168.x`, `172.16–31.x`, `169.254.x`, `*.local`) and tells the agent what to do instead |
+| Pass a path that lives on a remote device | Fetch it locally first, then pass the local path | A remote host's local path is just as unreachable for a public model |
+| `read` the image yourself, base64 it, and pass a data URL | Pass the path, or name it with a `sha256:` digest / `latest` | Those bytes land **in full inside the agent's context** — context spent and tokens burned; the plugin reading the same image costs the agent nothing. If a large data URL (≥20000 chars) is passed anyway, the tool result ends with a note telling the agent to switch |
+
+> Exception: when `baseUrl` itself points at a local model (Ollama / vLLM), the model and the image share one network, so private addresses are legitimate and are not blocked.
+
 ### Coordinate discipline
 
 For anything positional, pin the output shape in the prompt **and make the model report the pixel size

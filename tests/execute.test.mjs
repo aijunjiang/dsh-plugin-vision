@@ -263,5 +263,61 @@ await test('调用方 abort 时不抛异常，返回可读文案', async () => {
   assert.match(out, /超时或被中止|HTTP 请求失败/u)
 })
 
+console.log('传图纪律:')
+
+// 公网 endpoint 用 RFC 2606 保留域 .invalid：判定上算公网（触发拦截逻辑），
+// 但永远解析不出去，测试不会真的打网络。
+const PUBLIC_ENDPOINT = 'https://vision.invalid/v1'
+
+await test('公网模型 + 私有地址 URL 当场拦下并指路', async () => {
+  // endpoint 在公网，图片 URL 却指向内网：模型回不来，必须在发请求前拒绝
+  const remote = mount({ provider: 'ark', baseUrl: PUBLIC_ENDPOINT })
+  for (const url of [
+    'http://127.0.0.1:8080/a.png',
+    'http://localhost:9000/a.png',
+    'http://192.168.1.7/a.png',
+    'http://10.0.0.3:8000/a.png',
+    'http://172.20.1.9/a.png',
+    'http://169.254.10.1/a.png',
+    'http://my-nas.local/a.png',
+  ]) {
+    const out = await remote.execute({ images: [url], prompt: 'p' }, {})
+    assert.match(out, /指向私有地址/u, `应拦下 ${url}`)
+    assert.match(out, /不要为了「给模型一个 URL」去起本地或局域网图片服务/u, `应给出替代做法 ${url}`)
+    assert.match(out, /先取回本地/u, `应说明远端设备怎么办 ${url}`)
+  }
+  // 172.15 / 172.32 在私有段之外，不该误伤
+  const ok = await remote.execute({ images: ['http://172.15.0.1/a.png'], prompt: 'p' }, {})
+  assert.doesNotMatch(ok, /指向私有地址/u, '172.15 不是私有段')
+})
+
+await test('公网 URL 放行（拦截器不误伤正常链接）', async () => {
+  const remote = mount({ provider: 'ark', baseUrl: PUBLIC_ENDPOINT })
+  const out = await remote.execute({ images: ['https://example.com/a.png'], prompt: 'p' }, {})
+  // 过了拦截这一关就会去发请求，而 .invalid 解析不出去 —— 报的是网络错误而非私有地址
+  assert.doesNotMatch(out, /指向私有地址/u)
+  assert.match(out, /HTTP 请求失败|超时或被中止/u)
+})
+
+await test('本机模型时私有地址合法（不误伤 Ollama / vLLM）', async () => {
+  // baseUrl 本身就是 127.0.0.1，说明模型与图片在同一张网里
+  reply({ content: 'ok' })
+  const out = await analyze.execute({ images: ['http://192.168.1.7/a.png'], prompt: 'p' }, {})
+  assert.doesNotMatch(out, /指向私有地址/u)
+  assert.equal(lastRequest.body.messages[0].content[0].image_url.url, 'http://192.168.1.7/a.png')
+})
+
+await test('调用方硬塞大段 base64 时，结果里回敬一条纠正', async () => {
+  const bulky = `data:image/png;base64,${'A'.repeat(30000)}`
+  reply({ content: 'ok' })
+  const out = await analyze.execute({ images: [bulky], prompt: 'p' }, {})
+  assert.match(out, /base64 data URL 是你直接拼进参数的/u)
+  assert.match(out, /下次直接传文件路径或 sha256 摘要/u)
+  // 小图不该触发唠叨
+  reply({ content: 'ok' })
+  const quiet = await analyze.execute({ images: [TINY_PNG], prompt: 'p' }, {})
+  assert.doesNotMatch(quiet, /直接拼进参数/u)
+})
+
 server.close()
 console.log(`\n✅ ${passed} 项断言全部通过`)
