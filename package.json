@@ -19,7 +19,8 @@
   ],
   "scripts": {
     "sync": "node scripts/sync-catalog.mjs",
-    "check": "node --check index.js && node --check catalog.js && node --check client.js && node scripts/sync-catalog.mjs --check"
+    "test": "node tests/client-card.test.cjs",
+    "check": "node --check index.js && node --check catalog.js && node --check client.js && node scripts/sync-catalog.mjs --check && node tests/client-card.test.cjs"
   },
   "license": "MIT",
   "keywords": [

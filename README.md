@@ -153,12 +153,32 @@ web profile 是 live-reload：保存补丁文件，宿主半（两个工具 + �
 
 ```bash
 npm run sync    # 用 catalog.js 重新生成 client.js 里的 CATALOG 镜像
-npm run check   # 语法检查 + 校验镜像是否已同步
+npm test        # 离线渲染设置卡片并断言（不开浏览器；找不到 react 自动跳过）
+npm run check   # 语法检查 + 校验镜像同步 + 跑上面的渲染测试
 ```
 
 - `catalog.js` —— 供应商与能力清单，**唯一真相源**。加一家供应商只改这里，然后 `npm run sync`。
 - `index.js` —— 宿主半：两个工具、配置命名空间、密钥解析、图片解析、动态系统提示段落。
 - `client.js` —— 客户端半：设置卡片。客户端 bundle 不允许 import，故 CATALOG 以生成的方式内联。
+- `tests/client-card.test.cjs` —— 用 `react-dom/server` 把卡片渲染成静态 HTML，断言控件齐全、
+  徽标状态正确、保存设置与写凭据的调用序列无误。React 从本地或 DSH profile 的 `node_modules` 解析。
+
+### 想在没有真实密钥时联调？
+
+起一个 OpenAI 兼容的假端点，把 `baseUrl` 指过去、`apiKey` 随便填，就能验证请求体与全链路：
+
+```js
+// mock.cjs —— 收到什么就落盘什么，然后回一段固定答复
+require('node:http').createServer((req, res) => {
+  const chunks = []
+  req.on('data', c => chunks.push(c))
+  req.on('end', () => {
+    require('node:fs').writeFileSync('last-request.json', Buffer.concat(chunks).toString())
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ choices: [{ message: { content: 'MOCK OK' }, finish_reason: 'stop' }] }))
+  })
+}).listen(8791, '127.0.0.1')
+```
 
 ## License
 
