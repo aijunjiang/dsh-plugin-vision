@@ -153,15 +153,22 @@ web profile 是 live-reload：保存补丁文件，宿主半（两个工具 + �
 
 ```bash
 npm run sync    # 用 catalog.js 重新生成 client.js 里的 CATALOG 镜像
-npm test        # 离线渲染设置卡片并断言（不开浏览器；找不到 react 自动跳过）
-npm run check   # 语法检查 + 校验镜像同步 + 跑上面的渲染测试
+npm test        # 宿主逻辑测试 + 卡片离线渲染测试（不开浏览器）
+npm run check   # 语法检查 + 校验镜像同步 + 跑全部测试
 ```
 
 - `catalog.js` —— 供应商与能力清单，**唯一真相源**。加一家供应商只改这里，然后 `npm run sync`。
 - `index.js` —— 宿主半：两个工具、配置命名空间、密钥解析、图片解析、动态系统提示段落。
 - `client.js` —— 客户端半：设置卡片。客户端 bundle 不允许 import，故 CATALOG 以生成的方式内联。
+- `tests/session-images.test.mjs` —— 会话图片枚举（`latest` / 摘要点名的地基）：覆盖宿主
+  session-controller 走的全部五条事件路径（`data.content`、`data.message.content`、`data.inserted[]`、
+  `assistant/chunk` 的 `block-end`、嵌套 `tool-result`），外加去重、顺序、脏数据与配置归一化、提示词注入。
 - `tests/client-card.test.cjs` —— 用 `react-dom/server` 把卡片渲染成静态 HTML，断言控件齐全、
-  徽标状态正确、保存设置与写凭据的调用序列无误。React 从本地或 DSH profile 的 `node_modules` 解析。
+  徽标状态正确、保存设置与写凭据的调用序列无误。
+
+两个测试都会在依赖缺失时自动跳过（退出码 0）：`index.js` 需要 `@deepseek-ai/schemastery`，
+卡片测试需要 `react` / `react-dom`（浏览器端由 DSH 平台注入，本地可从 DSH profile 的
+`node_modules` 解析）。
 
 ### 想在没有真实密钥时联调？
 

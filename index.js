@@ -168,11 +168,12 @@ function dshHome() {
 
 /**
  * 从一条会话事件里收集 image content part（对齐宿主 session-controller 的遍历口径）。
+ * 导出仅为单元测试可达；插件运行时不依赖外部调用。
  * @param {unknown} content content 数组
  * @param {Array} out 收集结果
  * @param {Set<string>} seen 去重集合
  */
-function collectImageBlocks(content, out, seen) {
+export function collectImageBlocks(content, out, seen) {
   if (!Array.isArray(content)) return
   for (const value of content) {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) continue
@@ -190,10 +191,11 @@ function collectImageBlocks(content, out, seen) {
 
 /**
  * 列出当前会话出现过的图片附件（按出现顺序，旧→新）。
+ * 导出仅为单元测试可达；插件运行时不依赖外部调用。
  * @param {object} exec 工具执行上下文
  * @returns {Array<object>} ImageAttachmentRef 列表
  */
-function sessionImageRefs(exec) {
+export function sessionImageRefs(exec) {
   const out = []
   const seen = new Set()
   const session = exec !== undefined && exec !== null && exec.agent ? exec.agent.session : undefined
