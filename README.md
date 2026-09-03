@@ -26,13 +26,24 @@ online vision model (VLM), and gets a written answer back.
 
 ## Install
 
-### From the package registry
+### A. Official `dsh plugin add` (recommended)
+
+> ⚠️ **Do not run `dsh plugin add dsh-plugin-vision`.** That bare name resolves to the public npm
+> registry, where `dsh-plugin-vision` belongs to an unrelated project by a different author — it is
+> not this plugin and will not work with a current DSH. Always install from this repository.
 
 ```bash
-dsh plugin add dsh-plugin-vision
+dsh plugin --profile web add github:aijunjiang/dsh-plugin-vision
+# or from a local checkout: dsh plugin --profile web add <this-repo-path>
 ```
 
-### Local development
+> The internal `@deepseek-ai` packages ride the DSH baseline as optional peers, so npm pulls nothing;
+> the package declaring `dsh.bundle` is auto-registered into the profile's bundles layer.
+> Uninstall: `dsh plugin --profile web remove dsh-plugin-vision`.
+
+Restart `dsh web` once after installing so the settings card appears.
+
+### B. Local development
 
 Link the repository into the target profile's `node_modules` under its package name, then add one row
 to that profile's `cordis.patch.yml`:

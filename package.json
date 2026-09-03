@@ -15,8 +15,13 @@
     "catalog.js",
     "client.js",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "README.zh-CN.md"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aijunjiang/dsh-plugin-vision.git"
+  },
   "scripts": {
     "sync": "node scripts/sync-catalog.mjs",
     "test": "node tests/session-images.test.mjs && node tests/execute.test.mjs && node tests/client-card.test.cjs",
@@ -31,13 +36,18 @@
     "ocr",
     "grounding"
   ],
-  "dependencies": {
-    "@deepseek-ai/schemastery": "0.1.2-alpha.3"
-  },
+  "dependencies": {},
   "peerDependencies": {
-    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/cordis": ">=4.0.1",
+    "@deepseek-ai/schemastery": ">=3.18.1",
     "@deepseek-ai/dsh-settings": "*",
     "@deepseek-ai/dsh-tools": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": { "optional": true },
+    "@deepseek-ai/schemastery": { "optional": true },
+    "@deepseek-ai/dsh-settings": { "optional": true },
+    "@deepseek-ai/dsh-tools": { "optional": true }
   },
   "dsh": {
     "client": {

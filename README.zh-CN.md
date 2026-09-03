@@ -23,13 +23,24 @@
 
 ## 安装
 
-### 从包安装
+### 方式 A：官方 `dsh plugin add`（推荐）
+
+> ⚠️ **不要执行 `dsh plugin add dsh-plugin-vision`。** 这个裸包名会去公共 npm registry 解析，而
+> npm 上的 `dsh-plugin-vision` 是另一位作者的无关项目，不是本插件，且与当前版本的 DSH 不兼容。
+> 请始终从本仓库安装。
 
 ```bash
-dsh plugin add dsh-plugin-vision
+dsh plugin --profile web add github:aijunjiang/dsh-plugin-vision
+# 或从本地检出安装：dsh plugin --profile web add <本仓库路径>
 ```
 
-### 本地开发热装载
+> 内部 `@deepseek-ai` 依赖全部走 DSH 基线的可选 peer，npm 一个包都不会拉；
+> 声明了 `dsh.bundle` 的包会自动注册进 profile 的 bundles 层。
+> 卸载：`dsh plugin --profile web remove dsh-plugin-vision`。
+
+装完重启一次 `dsh web`，设置卡片才会出现。
+
+### 方式 B：本地开发热装载
 
 把仓库以包名链接进目标 profile 的 `node_modules`，再在该 profile 的 `cordis.patch.yml` 里插一行：
 
