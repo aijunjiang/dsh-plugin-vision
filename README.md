@@ -1,34 +1,44 @@
 # dsh-plugin-vision
 
-给 DSH 的 agent 装一双眼睛。
+**English** · [简体中文](./README.zh-CN.md)
 
-主模型是纯文本的时候，会话里的图片对它来说只是一行
-`[image omitted because this model accepts text only; attachment sha256:1a2b3c4d]`。
-这个插件把那道缺口补上：agent 自己写观察指令，把图片交给在线视觉大模型（VLM）去看，拿回文字结论。
+Give a DSH agent a pair of eyes.
 
-- **多供应商**：统一按 OpenAI 兼容的 `POST {baseUrl}/chat/completions` 调用，内置 11 家预设，也可填自定义 endpoint。
-- **能力勾选即提示词**：在设置卡片里勾选该模型的特色能力（检测框 / OCR / 文档图表 / 视频 / GUI / 深度思考 / 多图对比…），
-  这些说明会**实时注入 agent 的系统提示**，告诉它「这台模型还能干什么、该怎么提要求」。
-- **提示词归 agent**：插件不预置「请描述这张图片」之类的模板。观察什么、要多细、输出什么格式，由 agent 现场撰写。
-- **看得见会话里的图**：用户在输入框上传的图片，agent 可以直接用 `latest` 或那串 8 位摘要点名分析。
-- **密钥进凭据库**：API Key 存在 `~/.dsh/.credentials.yaml`，界面只显示「已配置 / 未配置」，永不回显字面量。
+When the main model is text-only, an image in the conversation is just a line saying
+`[image omitted because this model accepts text only; attachment sha256:1a2b3c4d]`.
+This plugin closes that gap: the agent writes its own observation prompt, hands the image to an
+online vision model (VLM), and gets a written answer back.
+
+- **Many providers** — every call is the OpenAI-compatible `POST {baseUrl}/chat/completions`.
+  Eleven presets ship in the box, and any other OpenAI-compatible endpoint works too.
+- **Checked capabilities become prompt text** — tick what this model is good at (grounding / OCR /
+  documents & charts / video / GUI / deep thinking / multi-image …) and those notes are **injected
+  into the agent's system prompt in real time**, telling it what else this model can do and how to ask.
+- **The prompt belongs to the agent** — the plugin ships no "describe this image" template. What to
+  look at, how finely, and in what output shape is written by the agent on the spot.
+- **It can see images from the conversation** — whatever the user drops into the input box, the agent
+  can name with `latest` or with the eight-hex digest it sees in the placeholder.
+- **Keys live in the credential store** — written to `~/.dsh/.credentials.yaml`; the UI only ever shows
+  *configured* or *not set*, never the literal.
+- **Bilingual UI** — the settings card follows DSH's own language preference (中文 / English).
 
 ---
 
-## 安装
+## Install
 
-### 从包安装（推荐）
+### From the package registry
 
 ```bash
 dsh plugin add dsh-plugin-vision
 ```
 
-### 本地开发热装载
+### Local development
 
-把仓库以包名链接进目标 profile 的 `node_modules`，再在该 profile 的 `cordis.patch.yml` 里插一行：
+Link the repository into the target profile's `node_modules` under its package name, then add one row
+to that profile's `cordis.patch.yml`:
 
 ```powershell
-# Windows（web profile 为例）
+# Windows, using the web profile
 New-Item -ItemType Junction `
   -Path  "$env:USERPROFILE\.dsh\profiles\web\node_modules\dsh-plugin-vision" `
   -Target "C:\path\to\dsh-plugin-vision"
@@ -44,142 +54,157 @@ New-Item -ItemType Junction `
         apiKeyEnv: ARK_API_KEY
 ```
 
-web profile 是 live-reload：保存补丁文件，**配置改动**（供应商、模型、baseUrl…）立刻生效，不用重启。
-但 **插件源码（`index.js` / `catalog.js`）的改动不会热更**——模块被 ESM 缓存住了，改完要重启 `dsh web`。
-**设置卡片属于客户端半，需要刷新一次页面；首次安装后如果卡片没出现，重启 `dsh web` 即可。**
+The web profile is live-reloading: saving the patch file applies **configuration changes** (provider,
+model, base URL …) immediately. But **changes to the plugin's own source** (`index.js`, `catalog.js`)
+are *not* hot-reloaded — the module stays in the ESM cache, so restart `dsh web` after editing it.
+**The settings card is the browser half: refresh the page once; if it still does not appear, restart
+`dsh web`.**
 
-> ⚠️ Windows 上改这个 YAML 千万别用 PowerShell 5.1 的 `Get-Content` / `Set-Content -Encoding utf8`：
-> 前者按 GBK 解码会毁掉中文注释，后者会写入 BOM，两者都会让整个补丁层解析失败、所有插件一起掉线。
-> 用 `[System.IO.File]::ReadAllText/WriteAllText($p, $t, (New-Object System.Text.UTF8Encoding($false)))`。
+> ⚠️ On Windows, never edit that YAML with PowerShell 5.1's `Get-Content` / `Set-Content -Encoding utf8`:
+> the first decodes as GBK and destroys non-ASCII comments, the second writes a BOM. Either one makes
+> the whole patch layer fail to parse and takes every plugin down with it. Use
+> `[System.IO.File]::ReadAllText/WriteAllText($p, $t, (New-Object System.Text.UTF8Encoding($false)))`.
 
 ---
 
-## 配置
+## Configure
 
-设置 → 插件 → **视觉能力 vision_analyze**。
+Settings → Plugins → **Vision**.
 
-| 项 | 说明 |
+| Field | Meaning |
 | --- | --- |
-| 供应商 | 切换即带出该家的默认 endpoint、模型与能力勾选 |
-| 模型 ID | 留空 = 用预设模型。**模型 ID 会随厂商迭代变化，过期了就在这里改** |
-| Base URL | 留空 = 用预设 endpoint；私有部署 / 代理在这里填 |
-| API Key | 写进 DSH 凭据库；留空表示不改动已存密钥 |
-| 特色能力 | 勾选项注入 agent 系统提示；不勾就不会告诉 agent 该模型有这个本事 |
-| 细节档位 | `auto` / `high`（看小字更准）/ `low`（更快更省） |
-| 深度思考 | `default`（不传）/ `auto` / `enabled` / `disabled`，仅对支持的供应商生效 |
-| 单次最多图片数 | 默认 6 |
-| 超时(ms) | 默认 120000 |
-| 凭据引用名 | 密钥在凭据库里的键名，也可直接 export 同名环境变量 |
+| Provider | Switching resets model, base URL and capabilities to that vendor's defaults |
+| Model ID | Empty = the preset. **Vendors rotate model IDs; change it here when one expires** |
+| Base URL | Empty = the preset endpoint; point it at a private deployment or proxy |
+| API key | Written to the DSH credential store; empty = keep the stored key |
+| Capabilities | Checked items are injected into the agent's system prompt |
+| *Advanced* → Detail level | `auto` / `high` (better on small text) / `low` (faster, cheaper) |
+| *Advanced* → Deep thinking | `unset` / `auto` / `enabled` / `disabled`; honoured only where supported |
+| *Advanced* → Max images per call | Default 6 |
+| *Advanced* → Timeout (ms) | Default 120000 |
+| *Advanced* → Credential reference | The key name in the credential store; an environment variable of the same name also works |
 
-密钥解析顺序：**设置里的 `apiKey` 字段 → DSH 凭据域（`apiKeyEnv` 指向的引用）→ 同名环境变量**。
+Key resolution order: **the `apiKey` settings field → the DSH credential domain (whatever `apiKeyEnv`
+points at) → an environment variable of that name**.
 
-### 内置供应商预设
+### Bundled provider presets
 
-| id | 供应商 | 默认 endpoint | 默认模型 |
+| id | Provider | Default endpoint | Default model |
 | --- | --- | --- | --- |
-| `ark` | 火山方舟（豆包 Doubao） | `https://ark.cn-beijing.volces.com/api/v3` | `doubao-seed-1-6-vision-250815` |
-| `dashscope` | 阿里百炼（通义千问 Qwen-VL） | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3-vl-plus` |
-| `zhipu` | 智谱 BigModel（GLM-V） | `https://open.bigmodel.cn/api/paas/v4` | `glm-4.6v` |
+| `ark` | Volcengine Ark (Doubao) | `https://ark.cn-beijing.volces.com/api/v3` | `doubao-seed-1-6-vision-250815` |
+| `dashscope` | Alibaba Model Studio (Qwen-VL) | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3-vl-plus` |
+| `zhipu` | Zhipu BigModel (GLM-V) | `https://open.bigmodel.cn/api/paas/v4` | `glm-4.6v` |
 | `openai` | OpenAI | `https://api.openai.com/v1` | `gpt-4o` |
-| `gemini` | Google Gemini（OpenAI 兼容端点） | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.5-flash` |
-| `moonshot` | 月之暗面 Kimi | `https://api.moonshot.cn/v1` | `kimi-k3` |
-| `stepfun` | 阶跃星辰 StepFun | `https://api.stepfun.com/v1` | `step-1o-turbo-vision` |
-| `siliconflow` | 硅基流动 SiliconFlow | `https://api.siliconflow.cn/v1` | `Qwen/Qwen2.5-VL-72B-Instruct` |
-| `openrouter` | OpenRouter（聚合） | `https://openrouter.ai/api/v1` | `qwen/qwen2.5-vl-72b-instruct` |
-| `ollama` | 本地 Ollama / vLLM（OpenAI 兼容） | `http://127.0.0.1:11434/v1` | `qwen2.5vl:7b` |
-| `custom` | 自定义（任意 OpenAI 兼容服务） | （自己填） | （自己填） |
+| `gemini` | Google Gemini (OpenAI-compatible) | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.5-flash` |
+| `moonshot` | Moonshot Kimi | `https://api.moonshot.cn/v1` | `kimi-k3` |
+| `stepfun` | StepFun | `https://api.stepfun.com/v1` | `step-1o-turbo-vision` |
+| `siliconflow` | SiliconFlow | `https://api.siliconflow.cn/v1` | `Qwen/Qwen2.5-VL-72B-Instruct` |
+| `openrouter` | OpenRouter (aggregator) | `https://openrouter.ai/api/v1` | `qwen/qwen2.5-vl-72b-instruct` |
+| `ollama` | Local Ollama / vLLM (OpenAI-compatible) | `http://127.0.0.1:11434/v1` | `qwen2.5vl:7b` |
+| `custom` | Custom (any OpenAI-compatible service) | (yours) | (yours) |
 
-预设是**起点不是牢笼**：任何一家的 endpoint / 模型都能在卡片里改。模型 ID 更新很快，以厂商文档为准。
+A preset is **a starting point, not a cage**: every endpoint and model can be overwritten in the card.
+Model IDs move fast — the vendor's own documentation wins.
 
 ---
 
-## agent 怎么用
+## How the agent uses it
 
 ### `vision_analyze`
 
-| 参数 | 必填 | 说明 |
+| Parameter | Required | Meaning |
 | --- | --- | --- |
-| `images` | ✅ | 图片来源数组 |
-| `prompt` | ✅ | 观察指令，**由 agent 自己撰写** |
-| `system` | | 给 VLM 的角色设定 |
-| `model` | | 临时覆盖本次模型 |
+| `images` | ✅ | Array of image sources |
+| `prompt` | ✅ | The observation instruction, **written by the agent** |
+| `system` | | A role for the vision model |
+| `model` | | Override the model for this call only |
 | `detail` | | `auto` / `high` / `low` |
 | `thinking` | | `auto` / `enabled` / `disabled` |
-| `max_tokens` | | 本次回复上限 |
+| `max_tokens` | | Reply budget for this call |
 
-`images` 每一项可以是：
+Each entry of `images` may be:
 
-| 写法 | 含义 |
+| Form | Meaning |
 | --- | --- |
-| `C:\pic\a.png`、`/home/u/a.jpg` | 本地文件；经 `ctx.fs` 读取，尊重沙箱与远端路由；无扩展名也能按魔数识别 |
-| `https://…` | 远程 URL，原样交给 VLM 自己抓 |
-| `data:image/png;base64,…` | 直传 |
-| `sha256:1a2b3c4d` | 会话附件摘要，**支持前缀**——文本模型占位符里那 8 位就够 |
-| `latest` / `latest:3` | 本会话最近上传的 1 张 / 3 张图 |
+| `C:\pic\a.png`, `/home/u/a.jpg` | A local file, read through `ctx.fs` so the sandbox and any remote route still apply; a missing extension is resolved by magic bytes |
+| `https://…` | A remote URL, passed straight through for the model to fetch |
+| `data:image/png;base64,…` | Inline |
+| `sha256:1a2b3c4d` | A conversation attachment digest — **a prefix is enough**, so the eight hex characters in the text-only placeholder work |
+| `latest` / `latest:3` | The most recent 1 / 3 images in this conversation |
 
 ### `vision_list_images`
 
-无参数。列出当前会话里出现过的全部图片附件（名称、尺寸、类型、摘要），
-让 agent 在只看到 `[image omitted …]` 时也知道有哪些图可看、该点名哪一张。
+No parameters. Lists every image attachment seen in this conversation (name, size, type, digest) so
+an agent staring at `[image omitted …]` still knows which images exist and how to name one.
 
-### 坐标纪律
+### Coordinate discipline
 
-任何涉及位置的问题，都要在 prompt 里**写死输出格式并要求模型回报它处理的图像宽高**，否则坐标无法还原：
+For anything positional, pin the output shape in the prompt **and make the model report the pixel size
+of the image it actually processed** — otherwise the coordinates cannot be mapped back:
 
 ```
-只输出 JSON：[{"label":"...","bbox_2d":[x1,y1,x2,y2]}]
-并在 JSON 前用一行说明你处理的图像像素宽高，以及坐标是绝对像素还是归一化值。
+Output JSON only: [{"label":"...","bbox_2d":[x1,y1,x2,y2]}]
+Before the JSON, state on one line the pixel width and height of the image you processed,
+and whether the coordinates are absolute pixels or normalized.
 ```
 
-各家约定并不一致（已知：Qwen-VL 返回处理后图像的**绝对像素** `bbox_2d`；GLM-V 返回 **0–1000 归一化**
-且包在 `<|begin_of_box|> … <|end_of_box|>` 里），所以「让模型自报基准」比「假设某种基准」可靠。
+Vendors disagree here (known: Qwen-VL returns `bbox_2d` in **absolute pixels of the processed image**;
+GLM-V returns **0–1000 normalized** values wrapped in `<|begin_of_box|> … <|end_of_box|>`), so *asking
+the model to state its own basis* beats assuming one.
 
 ---
 
-## 排错
+## Troubleshooting
 
-| 现象 | 原因 / 处理 |
+| Symptom | Cause / fix |
 | --- | --- |
-| `未配置视觉模型 API Key` | 卡片里保存密钥，或 export `apiKeyEnv` 指定的环境变量 |
-| `HTTP 401 AuthenticationError` | 密钥取到了但不被该 endpoint 认可——注意「搜索 API 密钥」和「模型 API 密钥」通常不是同一把 |
-| `HTTP 404 / model not found` | 模型 ID 过期或该账号无权限，在卡片里换一个 |
-| `按摘要 xxx 没找到附件对象` | 先调 `vision_list_images` 确认摘要；跨会话的图不在当前会话事件里 |
-| `字节不是受支持的图片格式` | 只支持 PNG / JPEG / WebP / GIF / BMP |
-| 卡片不出现 | 客户端半需要刷新页面；仍无则重启 `dsh web` |
-| 所有插件一起消失 | 多半是 profile 的 `cordis.patch.yml` 被写坏（BOM / 编码），见上文警告 |
+| `未配置视觉模型 API Key` | Save a key in the card, or export the environment variable named by `apiKeyEnv` |
+| `HTTP 401 AuthenticationError` | A key was found but the endpoint rejects it — note that a *search* API key and a *model* API key are usually different things |
+| `HTTP 404 / model not found` | The model ID expired or the account lacks access; pick another in the card |
+| Only thinking content, no answer | A thinking model spent the whole budget on reasoning; raise `max_tokens` or set `thinking` to `disabled` |
+| `按摘要 xxx 没找到附件对象` | Call `vision_list_images` first; images from another conversation are not in this one's events |
+| `字节不是受支持的图片格式` | Only PNG / JPEG / WebP / GIF / BMP are accepted |
+| The card never appears | The browser half needs one page refresh; if that fails, restart `dsh web` |
+| Every plugin disappears at once | The profile's `cordis.patch.yml` is probably corrupted (BOM / encoding) — see the warning above |
 
 ---
 
-## 开发
+## Development
 
 ```bash
-npm run sync    # 用 catalog.js 重新生成 client.js 里的 CATALOG 镜像
-npm test        # 宿主逻辑测试 + 卡片离线渲染测试（不开浏览器）
-npm run check   # 语法检查 + 校验镜像同步 + 跑全部测试
+npm run sync    # regenerate the CATALOG mirror inside client.js from catalog.js
+npm test        # host logic + execute path + offline card rendering (no browser)
+npm run check   # syntax check + mirror-is-in-sync check + the full test suite
 ```
 
-- `catalog.js` —— 供应商与能力清单，**唯一真相源**。加一家供应商只改这里，然后 `npm run sync`。
-- `index.js` —— 宿主半：两个工具、配置命名空间、密钥解析、图片解析、动态系统提示段落。
-- `client.js` —— 客户端半：设置卡片。客户端 bundle 不允许 import，故 CATALOG 以生成的方式内联。
-- `tests/session-images.test.mjs` —— 会话图片枚举（`latest` / 摘要点名的地基）：覆盖宿主
-  session-controller 走的全部五条事件路径（`data.content`、`data.message.content`、`data.inserted[]`、
-  `assistant/chunk` 的 `block-end`、嵌套 `tool-result`），外加去重、顺序、脏数据与配置归一化、提示词注入。
-- `tests/execute.test.mjs` —— 起一个本地 OpenAI 兼容假端点，把 `execute()` 完整跑通：断言请求体
-  （鉴权头、各家 detail/thinking 映射、多图标注、extraBody 合并）与全部响应/错误分支
-  （分片 content、思考截断、只有思考没有正文、模型拒答、HTTP 500、非 JSON、缺 Key、张数超限、中止）。
-- `tests/client-card.test.cjs` —— 用 `react-dom/server` 把卡片渲染成静态 HTML，断言控件齐全、
-  徽标状态正确、保存设置与写凭据的调用序列无误。
+- `catalog.js` — providers and capabilities, **the single source of truth**. Adding a provider means
+  editing this file and running `npm run sync`.
+- `index.js` — the host half: two tools, the settings namespace, key resolution, image resolution,
+  and the live system-prompt section.
+- `client.js` — the browser half: the settings card and its `zh` / `en` dictionaries. A client bundle
+  may not `import`, so the catalog is mirrored in by generation rather than imported.
+- `tests/session-images.test.mjs` — conversation image enumeration (the ground `latest` and digests
+  stand on): all five event shapes the host's session controller walks (`data.content`,
+  `data.message.content`, `data.inserted[]`, the `block-end` of `assistant/chunk`, and nested
+  `tool-result`), plus de-duplication, ordering, hostile data, config normalization and prompt injection.
+- `tests/execute.test.mjs` — stands up a local OpenAI-compatible endpoint and drives `execute()`
+  end to end: request shape (auth header, per-vendor detail/thinking mapping, multi-image labelling,
+  `extraBody` merge) and every response/error branch (chunked content, truncation, thinking-only,
+  refusal, HTTP 500, non-JSON, missing key, too many images, abort).
+- `tests/client-card.test.cjs` — renders the card to static HTML with `react-dom/server` and asserts
+  the official card structure, both languages, `zh`/`en` key parity, the collapsed advanced section,
+  and the save/credential call sequence.
 
-三个测试都会在依赖缺失时自动跳过（退出码 0）：`index.js` 需要 `@deepseek-ai/schemastery`，
-卡片测试需要 `react` / `react-dom`（浏览器端由 DSH 平台注入，本地可从 DSH profile 的
-`node_modules` 解析）。
+All three skip cleanly (exit 0) when their dependencies are absent: `index.js` needs
+`@deepseek-ai/schemastery`, and the card test needs `react` / `react-dom` (injected by the DSH platform
+in the browser; locally they resolve from the DSH profile's `node_modules`).
 
-### 想在没有真实密钥时联调？
+### Working without a real key
 
-起一个 OpenAI 兼容的假端点，把 `baseUrl` 指过去、`apiKey` 随便填，就能验证请求体与全链路：
+Stand up an OpenAI-compatible fake endpoint, point `baseUrl` at it and put anything in `apiKey`:
 
 ```js
-// mock.cjs —— 收到什么就落盘什么，然后回一段固定答复
+// mock.cjs — dump whatever arrives, then answer with a fixed line
 require('node:http').createServer((req, res) => {
   const chunks = []
   req.on('data', c => chunks.push(c))

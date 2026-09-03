@@ -15,10 +15,16 @@ const END = '/* <<< CATALOG-SYNC-END */'
 
 const mirror = {
   defaultProvider: DEFAULT_PROVIDER,
-  capabilities: CAPABILITIES.map(cap => ({ id: cap.id, label: cap.label, promptHint: cap.promptHint })),
+  capabilities: CAPABILITIES.map(cap => ({
+    id: cap.id,
+    label: cap.label,
+    labelEn: cap.labelEn,
+    promptHint: cap.promptHint,
+  })),
   providers: PROVIDERS.map(provider => ({
     id: provider.id,
     label: provider.label,
+    labelEn: provider.labelEn,
     baseUrl: provider.baseUrl,
     model: provider.model,
     keyEnv: provider.keyEnv,

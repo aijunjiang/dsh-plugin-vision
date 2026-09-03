@@ -8,11 +8,15 @@
 /**
  * 视觉模型「特色能力」。勾选后会把 promptHint 注入 agent 的系统提示，
  * 告诉 agent 这台 VLM 还能做什么、该怎么跟它提要求。
+ *
+ * label / labelEn 是给人看的（设置卡片按界面语言取用）；
+ * promptHint 是给 agent 看的，不随界面语言变化。
  */
 export const CAPABILITIES = [
   {
     id: 'grounding',
     label: '视觉定位 / 检测框（bbox）',
+    labelEn: 'Visual grounding / bounding boxes',
     promptHint:
       '视觉定位：可以要求它框出目标。务必在 prompt 里写死输出格式，例如 '
       + '`只输出 JSON：[{"label":"...","bbox_2d":[x1,y1,x2,y2]}]`，'
@@ -21,6 +25,7 @@ export const CAPABILITIES = [
   {
     id: 'ocr',
     label: '高精度文字提取（OCR）',
+    labelEn: 'High-precision OCR / text extraction',
     promptHint:
       'OCR：适合票据、表单、截图取字。要求「逐行输出、保留原始版式与换行、不要改写不要总结」效果最好；'
       + '拿不准的字符让它标注 [?]。',
@@ -28,24 +33,28 @@ export const CAPABILITIES = [
   {
     id: 'doc',
     label: '文档 / 图表解析',
+    labelEn: 'Document / chart parsing',
     promptHint:
       '文档与图表解析：可以要求把表格还原成 Markdown 表格、把折线柱状图还原成数据点列表，并让它说明读数是精确值还是估算值。',
   },
   {
     id: 'video',
     label: '视频理解',
+    labelEn: 'Video understanding',
     promptHint:
       '视频理解：images 里可以直接传视频 URL（该供应商支持时）。要求它按时间线分段描述，并给出事件出现的大致时间点。',
   },
   {
     id: 'gui',
     label: 'GUI 界面元素识别',
+    labelEn: 'GUI element recognition',
     promptHint:
       'GUI 任务：识别按钮、图标、输入框并给出可点击位置。要求输出「元素名称 + 作用 + 坐标」，坐标基准同样要它自己声明。',
   },
   {
     id: 'thinking',
     label: '深度思考开关',
+    labelEn: 'Deep thinking toggle',
     promptHint:
       '深度思考：调用时可传 thinking="enabled" 让它先推理再回答（更准更慢更贵），'
       + '简单看图用 thinking="disabled" 省钱提速。',
@@ -53,12 +62,14 @@ export const CAPABILITIES = [
   {
     id: 'high_res',
     label: '高分辨率 / 细节模式',
+    labelEn: 'High-resolution / detail mode',
     promptHint:
       '高清模式：看小字、细纹理、密集图表时传 detail="high"；大致看一眼用 detail="low" 省 token。',
   },
   {
     id: 'multi_image',
     label: '多图对比',
+    labelEn: 'Multi-image comparison',
     promptHint:
       '多图输入：images 可以一次传多张，用于前后对比、找不同、多页文档。'
       + '在 prompt 里用「第 1 张 / 第 2 张」指代，顺序与 images 数组一致。',
@@ -66,6 +77,7 @@ export const CAPABILITIES = [
   {
     id: 'json_output',
     label: '结构化 JSON 输出',
+    labelEn: 'Structured JSON output',
     promptHint:
       '结构化输出：需要程序化消费时，在 prompt 里给出完整 JSON 骨架并要求「只输出 JSON，不要解释、不要代码围栏」。',
   },
@@ -81,6 +93,7 @@ export const PROVIDERS = [
   {
     id: 'ark',
     label: '火山方舟（豆包 Doubao）',
+    labelEn: 'Volcengine Ark (Doubao)',
     baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
     model: 'doubao-seed-1-6-vision-250815',
     keyEnv: 'ARK_API_KEY',
@@ -96,6 +109,7 @@ export const PROVIDERS = [
   {
     id: 'dashscope',
     label: '阿里百炼（通义千问 Qwen-VL）',
+    labelEn: 'Alibaba Model Studio (Qwen-VL)',
     baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     model: 'qwen3-vl-plus',
     keyEnv: 'DASHSCOPE_API_KEY',
@@ -115,6 +129,7 @@ export const PROVIDERS = [
   {
     id: 'zhipu',
     label: '智谱 BigModel（GLM-V）',
+    labelEn: 'Zhipu BigModel (GLM-V)',
     baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
     model: 'glm-4.6v',
     keyEnv: 'ZHIPU_API_KEY',
@@ -133,6 +148,7 @@ export const PROVIDERS = [
   {
     id: 'openai',
     label: 'OpenAI',
+    labelEn: 'OpenAI',
     baseUrl: 'https://api.openai.com/v1',
     model: 'gpt-4o',
     keyEnv: 'OPENAI_API_KEY',
@@ -148,6 +164,7 @@ export const PROVIDERS = [
   {
     id: 'gemini',
     label: 'Google Gemini（OpenAI 兼容端点）',
+    labelEn: 'Google Gemini (OpenAI-compatible)',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     model: 'gemini-2.5-flash',
     keyEnv: 'GEMINI_API_KEY',
@@ -160,6 +177,7 @@ export const PROVIDERS = [
   {
     id: 'moonshot',
     label: '月之暗面 Kimi',
+    labelEn: 'Moonshot Kimi',
     baseUrl: 'https://api.moonshot.cn/v1',
     model: 'kimi-k3',
     keyEnv: 'MOONSHOT_API_KEY',
@@ -172,6 +190,7 @@ export const PROVIDERS = [
   {
     id: 'stepfun',
     label: '阶跃星辰 StepFun',
+    labelEn: 'StepFun',
     baseUrl: 'https://api.stepfun.com/v1',
     model: 'step-1o-turbo-vision',
     keyEnv: 'STEP_API_KEY',
@@ -187,6 +206,7 @@ export const PROVIDERS = [
   {
     id: 'siliconflow',
     label: '硅基流动 SiliconFlow',
+    labelEn: 'SiliconFlow',
     baseUrl: 'https://api.siliconflow.cn/v1',
     model: 'Qwen/Qwen2.5-VL-72B-Instruct',
     keyEnv: 'SILICONFLOW_API_KEY',
@@ -202,6 +222,7 @@ export const PROVIDERS = [
   {
     id: 'openrouter',
     label: 'OpenRouter（聚合）',
+    labelEn: 'OpenRouter (aggregator)',
     baseUrl: 'https://openrouter.ai/api/v1',
     model: 'qwen/qwen2.5-vl-72b-instruct',
     keyEnv: 'OPENROUTER_API_KEY',
@@ -214,6 +235,7 @@ export const PROVIDERS = [
   {
     id: 'ollama',
     label: '本地 Ollama / vLLM（OpenAI 兼容）',
+    labelEn: 'Local Ollama / vLLM (OpenAI-compatible)',
     baseUrl: 'http://127.0.0.1:11434/v1',
     model: 'qwen2.5vl:7b',
     keyEnv: 'OLLAMA_API_KEY',
@@ -229,6 +251,7 @@ export const PROVIDERS = [
   {
     id: 'custom',
     label: '自定义（任意 OpenAI 兼容服务）',
+    labelEn: 'Custom (any OpenAI-compatible service)',
     baseUrl: '',
     model: '',
     keyEnv: 'VISION_API_KEY',
