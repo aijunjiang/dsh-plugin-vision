@@ -44,7 +44,8 @@ New-Item -ItemType Junction `
         apiKeyEnv: ARK_API_KEY
 ```
 
-web profile 是 live-reload：保存补丁文件，宿主半（两个工具 + 提示词注入）立刻生效，不用重启。
+web profile 是 live-reload：保存补丁文件，**配置改动**（供应商、模型、baseUrl…）立刻生效，不用重启。
+但 **插件源码（`index.js` / `catalog.js`）的改动不会热更**——模块被 ESM 缓存住了，改完要重启 `dsh web`。
 **设置卡片属于客户端半，需要刷新一次页面；首次安装后如果卡片没出现，重启 `dsh web` 即可。**
 
 > ⚠️ Windows 上改这个 YAML 千万别用 PowerShell 5.1 的 `Get-Content` / `Set-Content -Encoding utf8`：
@@ -163,10 +164,13 @@ npm run check   # 语法检查 + 校验镜像同步 + 跑全部测试
 - `tests/session-images.test.mjs` —— 会话图片枚举（`latest` / 摘要点名的地基）：覆盖宿主
   session-controller 走的全部五条事件路径（`data.content`、`data.message.content`、`data.inserted[]`、
   `assistant/chunk` 的 `block-end`、嵌套 `tool-result`），外加去重、顺序、脏数据与配置归一化、提示词注入。
+- `tests/execute.test.mjs` —— 起一个本地 OpenAI 兼容假端点，把 `execute()` 完整跑通：断言请求体
+  （鉴权头、各家 detail/thinking 映射、多图标注、extraBody 合并）与全部响应/错误分支
+  （分片 content、思考截断、只有思考没有正文、模型拒答、HTTP 500、非 JSON、缺 Key、张数超限、中止）。
 - `tests/client-card.test.cjs` —— 用 `react-dom/server` 把卡片渲染成静态 HTML，断言控件齐全、
   徽标状态正确、保存设置与写凭据的调用序列无误。
 
-两个测试都会在依赖缺失时自动跳过（退出码 0）：`index.js` 需要 `@deepseek-ai/schemastery`，
+三个测试都会在依赖缺失时自动跳过（退出码 0）：`index.js` 需要 `@deepseek-ai/schemastery`，
 卡片测试需要 `react` / `react-dom`（浏览器端由 DSH 平台注入，本地可从 DSH profile 的
 `node_modules` 解析）。
 

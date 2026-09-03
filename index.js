@@ -578,7 +578,21 @@ export function apply(ctx, entry) {
       const choice = Array.isArray(data.choices) && data.choices.length > 0 ? data.choices[0] : undefined
       const message = choice !== undefined ? choice.message : undefined
       const answer = readMessageText(message)
+      const reasoning = message !== undefined && typeof message.reasoning_content === 'string'
+        ? message.reasoning_content.trim()
+        : ''
       if (answer === '') {
+        // 模型明确拒答（OpenAI 的 refusal 字段）。
+        const refusal = message !== undefined && typeof message.refusal === 'string' ? message.refusal.trim() : ''
+        if (refusal !== '') return `视觉模型拒绝回答：${refusal}`
+        // 思考型模型的常见坑：token 全花在 reasoning 上，正文为空。
+        if (reasoning !== '') {
+          return `视觉模型只产出了思考内容、没有正文${choice.finish_reason === 'length' ? '（max_tokens 用尽）' : ''}。\n`
+            + `建议调大 max_tokens，或把 thinking 设为 disabled 再试。\n\n思考内容：\n${reasoning}`
+        }
+        if (choice !== undefined && choice.finish_reason === 'length') {
+          return '错误：视觉模型在产出正文前就耗尽了 max_tokens。请调大 max_tokens（工具参数或设置里）后重试。'
+        }
         return `错误：视觉模型没有返回正文（finish_reason=${choice !== undefined ? choice.finish_reason : '?'}）。`
           + `原始响应片段：${text.slice(0, 500)}`
       }
@@ -590,9 +604,10 @@ export function apply(ctx, entry) {
       })
       lines.push('')
       lines.push(answer.trim())
-      const reasoning = message !== undefined && typeof message.reasoning_content === 'string'
-        ? message.reasoning_content.trim()
-        : ''
+      if (choice !== undefined && choice.finish_reason === 'length') {
+        lines.push('')
+        lines.push('（注意：回复因 max_tokens 上限被截断，内容可能不完整。）')
+      }
       if (reasoning !== '') {
         lines.push('')
         lines.push(`（模型思考摘要：${reasoning.length > 600 ? `${reasoning.slice(0, 600)}…[已截断]` : reasoning}）`)
