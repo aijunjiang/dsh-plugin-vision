@@ -211,6 +211,10 @@ test('传图纪律三条都写进提示词，且与能力勾选无关', () => {
   assert.match(text, /挤占上下文/u)
   // 并给出正确做法
   assert.match(text, /直接把本地路径写进 images/u)
+  // 只有 base64 时的出口：JSON 图包，且给出可直接照抄的格式与语法
+  assert.match(text, /json:\/路径\/bundle\.json/u)
+  assert.match(text, /"images":\[\{"data"/u)
+  assert.match(text, /#2-4/u, '应说明多张图的选取语法')
 })
 
 console.log(`\n✅ ${passed} 项断言全部通过`)

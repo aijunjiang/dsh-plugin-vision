@@ -129,6 +129,7 @@ Each entry of `images` may be:
 | `C:\pic\a.png`, `/home/u/a.jpg` | A local file, read through `ctx.fs` so the sandbox and any remote route still apply; a missing extension is resolved by magic bytes |
 | `https://…` | A remote URL, passed straight through for the model to fetch |
 | `data:image/png;base64,…` | Inline |
+| `json:/path/bundle.json` | **A JSON image bundle**: base64 kept in a file, many images at once — see below |
 | `sha256:1a2b3c4d` | A conversation attachment digest — **a prefix is enough**, so the eight hex characters in the text-only placeholder work |
 | `latest` / `latest:3` | The most recent 1 / 3 images in this conversation |
 
@@ -146,6 +147,67 @@ an agent staring at `[image omitted …]` still knows which images exist and how
 | `read` the image yourself, base64 it, and pass a data URL | Pass the path, or name it with a `sha256:` digest / `latest` | Those bytes land **in full inside the agent's context** — context spent and tokens burned; the plugin reading the same image costs the agent nothing. If a large data URL (≥20000 chars) is passed anyway, the tool result ends with a note telling the agent to switch |
 
 > Exception: when `baseUrl` itself points at a local model (Ollama / vLLM), the model and the image share one network, so private addresses are legitimate and are not blocked.
+
+### JSON image bundles: the right way when all you have is base64
+
+Sometimes there really is no file — the bytes came back from a remote API, a database column, a script.
+Then **do not let the agent print the base64**. Write it to a JSON file on the side that produced it and
+let the agent pass a single path:
+
+```json
+{
+  "images": [
+    { "name": "first-frame", "data": "iVBORw0KGgoAAAANSUhEUg..." },
+    { "name": "last-frame",  "data": "iVBORw0KGgoAAAANSUhEUg..." }
+  ]
+}
+```
+
+```
+images: ["json:/tmp/bundle.json"]        the whole bundle
+images: ["json:/tmp/bundle.json#2"]      only the 2nd image
+images: ["json:/tmp/bundle.json#2-4"]    images 2 through 4
+```
+
+**What it saves** — measured on three 200×150 PNGs:
+
+| | Characters | ≈ tokens |
+| --- | ---: | ---: |
+| Inlined as data URLs in `images` | 297,373 | ~74,000 |
+| `json:/tmp/bundle.json` | **75** | **~20** |
+
+The model receives **exactly the same images**; what disappears is the copy in the agent's context.
+
+The parser is **deliberately liberal** (Postel's law) — all of these are accepted:
+
+| Where | Accepted |
+| --- | --- |
+| Top level | `{"images":[…]}`, `{"items"/"list"/"data"/"frames":[…]}`, a bare array, or a single object for one image |
+| Entry | An object, or **a bare base64 string** |
+| Image field | `data` / `base64` / `b64` / `content` / `bytes` / `image` / `dataUrl`; the value may carry a `data:image/...;base64,` prefix, contain newlines, or be URL-safe base64 |
+| Alternative source | `path` (a relative path resolves against **the JSON file's own directory**) or `url` (still subject to the private-address block) |
+| Media type | `mediaType` / `mime` / `type` … may be **omitted entirely** — the plugin sniffs the magic bytes; a wrong declaration loses to the sniff and is flagged in the label |
+| Name | `name` / `label` / `title` / `id` …, carried into the image label so the prompt can refer to "image 2" |
+
+One line on the producing side:
+
+```bash
+# Remote box: bundle every PNG in the current directory
+python3 -c "
+import base64, glob, json
+print(json.dumps({'images':[{'name':p,'data':base64.b64encode(open(p,'rb').read()).decode()} for p in sorted(glob.glob('*.png'))]}))
+" > bundle.json
+```
+
+```js
+// Node: dump in-memory buffers straight into a bundle
+fs.writeFileSync('bundle.json', JSON.stringify({
+  images: buffers.map((b, i) => ({ name: `frame-${i}`, data: b.toString('base64') })),
+}))
+```
+
+Limits: each image still obeys the **per-image byte cap**, the expanded total still obeys **max images per
+call**, the whole file is capped at 128 MB, and a bundle may not reference another bundle.
 
 ### Coordinate discipline
 

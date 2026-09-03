@@ -33,6 +33,8 @@ const DEFAULT_MAX_IMAGES = 6
 const DEFAULT_MAX_IMAGE_BYTES = 12 * 1024 * 1024
 // 调用方自己拼的 base64 超过这个字符数，就在结果末尾提醒它改传路径（约 15KB 图片）。
 const INLINE_DATA_URL_WARN_CHARS = 20000
+// JSON 图包整包读取上限，防止一个失控的文件把宿主内存吃穿。
+const MAX_BUNDLE_BYTES = 128 * 1024 * 1024
 /** 系统提示段落位置：排在官方工具段（1000~2900）之后。 */
 const PROMPT_SECTION_ORDER = 3050
 
@@ -125,7 +127,12 @@ export function buildPromptSection(cfg) {
     + '\n- 图片在远端设备上（SSH 路由等），先取回本地再传本地路径。远端主机的本地路径对公网模型同样不可达。'
     + '\n- 不要自己读图片的 base64 再拼成 data URL 传进来。那串字节会完整落进你的上下文，'
     + '既挤占上下文又白花 token，而插件读同一张图不占你一个 token。'
-    + '会话里已有的图用 sha256 摘要或 latest 点名，磁盘上的图用路径。',
+    + '会话里已有的图用 sha256 摘要或 latest 点名，磁盘上的图用路径。'
+    + '\n- 确实只有 base64、拿不到文件（远端 API 返回、数据库字段、脚本产物等）时，'
+    + '不要把它打印出来——在产生它的那一侧把 base64 写成 JSON 文件，再传 "json:/路径/bundle.json"。'
+    + '格式：{"images":[{"data":"<base64>","name":"可选"}]}（顶层数组、纯 base64 字符串数组也认；'
+    + 'mediaType 可省略，插件按字节嗅探）。多张图一个文件即可，'
+    + '"json:/路径/bundle.json#2" 取第 2 张、"#2-4" 取一段。这样无论多少张图，你的上下文只花掉一行路径。',
   )
   lines.push(
     'Each call is a one-shot question with no memory of previous calls: put all needed context into prompt, and call again to follow up.'
@@ -342,18 +349,229 @@ function toDataUrl(bytes, mediaType) {
   return `data:${mediaType};base64,${Buffer.from(bytes).toString('base64')}`
 }
 
+// ------------------------------------------------------------ JSON 图包解析
+//
+// 目的：让 base64 永远不必穿过 agent 的上下文。
+// 生产方（远端脚本 / 本地流程）把图片写成一个 JSON 文件，agent 只传这一行路径，
+// 插件在宿主侧读文件、解码、下发。上下文成本从「整张图的 base64」降到「一个路径」。
+
+/** JSON 图包里一条记录的键名别名，尽量兼容各种生产方写法。 */
+const BUNDLE_LIST_KEYS = ['images', 'items', 'list', 'data', 'pictures', 'frames']
+const BUNDLE_DATA_KEYS = ['data', 'base64', 'b64', 'content', 'bytes', 'image', 'dataUrl', 'data_url']
+const BUNDLE_TYPE_KEYS = ['mediaType', 'media_type', 'mimeType', 'mime_type', 'mime', 'contentType', 'content_type', 'type', 'format']
+const BUNDLE_NAME_KEYS = ['name', 'label', 'title', 'id', 'filename', 'file']
+const BUNDLE_PATH_KEYS = ['path', 'file_path', 'filePath', 'src']
+
+/**
+ * 从对象里按别名列表取第一个非空字符串。
+ * @param {object} obj 源对象
+ * @param {string[]} keys 候选键名
+ * @returns {string|undefined} 命中的值
+ */
+function pickString(obj, keys) {
+  for (const key of keys) {
+    const value = obj[key]
+    if (typeof value === 'string' && value.trim() !== '') return value.trim()
+  }
+  return undefined
+}
+
+/**
+ * 把解析出的 JSON 归一化成条目数组。
+ * 接受：{images:[…]} / 顶层数组 / 单个对象 / 纯 base64 字符串数组。
+ * @param {unknown} parsed JSON.parse 的结果
+ * @returns {Array<object|string>} 条目数组
+ */
+function bundleEntries(parsed) {
+  if (Array.isArray(parsed)) return parsed
+  if (parsed === null || typeof parsed !== 'object') {
+    throw new Error('JSON 顶层既不是数组也不是对象')
+  }
+  for (const key of BUNDLE_LIST_KEYS) {
+    const value = parsed[key]
+    if (Array.isArray(value)) return value
+  }
+  // 单张图直接写成一个对象也认
+  if (pickString(parsed, BUNDLE_DATA_KEYS) !== undefined || pickString(parsed, BUNDLE_PATH_KEYS) !== undefined
+    || typeof parsed.url === 'string') {
+    return [parsed]
+  }
+  throw new Error(
+    `找不到图片列表。期望 {"images":[…]} 或顶层数组；实际顶层键：${Object.keys(parsed).slice(0, 8).join(', ') || '(空对象)'}`,
+  )
+}
+
+/**
+ * 解码一条 base64（容忍 data URL 前缀与换行），并校验体积与格式。
+ * @param {string} raw base64 或 data URL
+ * @param {number} maxBytes 单图字节上限
+ * @param {string} where 出错时的定位描述
+ * @returns {{bytes: Buffer, mediaType: string}} 字节与嗅探出的类型
+ */
+function decodeBundleImage(raw, maxBytes, where) {
+  const stripped = raw.replace(/^data:[^;,]*;base64,/iu, '').replace(/\s+/gu, '')
+  if (stripped === '') throw new Error(`${where} 的 base64 为空`)
+  if (!/^[A-Za-z0-9+/=_-]+$/u.test(stripped)) {
+    throw new Error(`${where} 不是合法 base64（含非法字符）`)
+  }
+  // 兼容 URL-safe base64
+  const normalized = stripped.replace(/-/gu, '+').replace(/_/gu, '/')
+  const bytes = Buffer.from(normalized, 'base64')
+  if (bytes.length === 0) throw new Error(`${where} 的 base64 解码后为空`)
+  if (bytes.length > maxBytes) {
+    throw new Error(`${where} 解码后 ${bytes.length} 字节，超过单图上限 ${maxBytes}`)
+  }
+  const mediaType = sniffMediaType(bytes)
+  if (mediaType === undefined) {
+    throw new Error(`${where} 解码后不是受支持的图片格式（PNG/JPEG/WebP/GIF/BMP）——检查生产方是否漏了 base64 编码或写错了字段`)
+  }
+  return { bytes, mediaType }
+}
+
+/**
+ * 解析 JSON 图包，展开成可下发的图片列表。
+ * @param {object} ctx Cordis 上下文
+ * @param {object} exec 工具执行上下文
+ * @param {string} bundlePath JSON 文件路径
+ * @param {string} selector 可选的 1 基选择子，如 "2" 或 "2-4"
+ * @param {object} cfg 归一化配置
+ * @param {number} depth 递归深度，用于禁止 JSON 图包再套 JSON 图包
+ * @returns {Promise<Array<{url: string, label: string}>>} 解析结果
+ */
+async function resolveBundle(ctx, exec, bundlePath, selector, cfg, depth) {
+  if (depth >= 1) throw new Error('JSON 图包里不能再引用另一个 JSON 图包（避免无限套娃）')
+  const bundleCap = Math.min(cfg.maxImageBytes * cfg.maxImages * 2, MAX_BUNDLE_BYTES)
+  let text
+  let displayPath = bundlePath
+  try {
+    const read = await readLocalImage(ctx, exec, bundlePath, bundleCap)
+    displayPath = read.displayPath
+    text = Buffer.from(read.bytes).toString('utf8').replace(/^\uFEFF/u, '')
+  } catch (error) {
+    const message = error !== null && typeof error === 'object' && error.message ? error.message : String(error)
+    throw new Error(`读不到 JSON 图包 "${bundlePath}"：${message}`)
+  }
+
+  let parsed
+  try {
+    parsed = JSON.parse(text)
+  } catch (error) {
+    const message = error !== null && typeof error === 'object' && error.message ? error.message : String(error)
+    throw new Error(`"${displayPath}" 不是合法 JSON：${message}`)
+  }
+
+  let entries
+  try {
+    entries = bundleEntries(parsed)
+  } catch (error) {
+    throw new Error(`"${displayPath}" 结构不对：${error.message}`)
+  }
+  if (entries.length === 0) throw new Error(`"${displayPath}" 里没有任何图片条目`)
+
+  // 选择子：#2 取第 2 张，#2-4 取第 2 到第 4 张（1 基，闭区间）
+  let picked = entries.map((entry, index) => ({ entry, index }))
+  if (selector !== undefined) {
+    const range = selector.match(/^(\d+)(?:-(\d+))?$/u)
+    if (range === null) throw new Error(`选择子 "#${selector}" 不合法，应为 #2 或 #2-4`)
+    const from = Number(range[1])
+    const to = range[2] === undefined ? from : Number(range[2])
+    if (from < 1 || to < from) throw new Error(`选择子 "#${selector}" 越界（应为 1 基、左小右大）`)
+    if (from > entries.length) {
+      throw new Error(`选择子 "#${selector}" 超出范围："${displayPath}" 里只有 ${entries.length} 张`)
+    }
+    picked = picked.slice(from - 1, Math.min(to, entries.length))
+  }
+
+  const dir = displayPath.replace(/[/\\][^/\\]*$/u, '')
+  const out = []
+  for (const { entry, index } of picked) {
+    const where = `"${displayPath}" 第 ${index + 1} 条`
+
+    // 形式一：整条就是一串 base64 或 data URL
+    if (typeof entry === 'string') {
+      const { bytes, mediaType } = decodeBundleImage(entry, cfg.maxImageBytes, where)
+      out.push({
+        url: toDataUrl(bytes, mediaType),
+        label: `JSON 图包 ${displayPath} #${index + 1}（${mediaType}，${bytes.length} 字节）`,
+      })
+      continue
+    }
+    if (entry === null || typeof entry !== 'object') {
+      throw new Error(`${where} 既不是字符串也不是对象`)
+    }
+
+    const name = pickString(entry, BUNDLE_NAME_KEYS)
+    const tag = name !== undefined ? ` "${name}"` : ''
+
+    // 形式二：条目里给的是 URL，转交常规 URL 分支（含私有地址拦截）
+    if (typeof entry.url === 'string' && entry.url.trim() !== '') {
+      const nested = await resolveImageSpec(ctx, exec, entry.url.trim(), cfg, depth + 1)
+      for (const item of nested) {
+        out.push({ ...item, label: `JSON 图包 ${displayPath} #${index + 1}${tag} → ${item.label}` })
+      }
+      continue
+    }
+
+    // 形式三：条目里给的是文件路径（相对路径按 JSON 文件所在目录解析）
+    const entryPath = pickString(entry, BUNDLE_PATH_KEYS)
+    if (entryPath !== undefined) {
+      const absolute = /^([a-zA-Z]:[/\\]|[/\\])/u.test(entryPath) || dir === ''
+        ? entryPath
+        : `${dir}/${entryPath}`
+      const nested = await resolveImageSpec(ctx, exec, absolute, cfg, depth + 1)
+      for (const item of nested) {
+        out.push({ ...item, label: `JSON 图包 ${displayPath} #${index + 1}${tag} → ${item.label}` })
+      }
+      continue
+    }
+
+    // 形式四（主路径）：内联 base64
+    const raw = pickString(entry, BUNDLE_DATA_KEYS)
+    if (raw === undefined) {
+      throw new Error(
+        `${where} 里找不到图片数据。每条至少要有 data（base64）、path（文件路径）或 url 之一；`
+        + `实际键：${Object.keys(entry).slice(0, 8).join(', ') || '(空对象)'}`,
+      )
+    }
+    const { bytes, mediaType } = decodeBundleImage(raw, cfg.maxImageBytes, where)
+    // 声明的类型仅作展示；实际以嗅探为准，避免生产方写错 mediaType 导致模型拒收
+    const declared = pickString(entry, BUNDLE_TYPE_KEYS)
+    const mismatch = declared !== undefined && !declared.toLowerCase().includes(mediaType.split('/')[1])
+      ? `，声明为 ${declared} 但实际是 ${mediaType}`
+      : ''
+    out.push({
+      url: toDataUrl(bytes, mediaType),
+      label: `JSON 图包 ${displayPath} #${index + 1}${tag}（${mediaType}，${bytes.length} 字节${mismatch}）`,
+    })
+  }
+  return out
+}
+
 /**
  * 把一个 images 入参解析成可直接下发的 image_url。
  * @param {object} ctx Cordis 上下文
  * @param {object} exec 工具执行上下文
  * @param {string} spec 单个图片来源
  * @param {object} cfg 归一化配置
+ * @param {number} [depth] 递归深度（JSON 图包内部解析时为 1）
  * @returns {Promise<Array<{url: string, label: string}>>} 解析结果（latest:N 会展开成多张）
  */
-async function resolveImageSpec(ctx, exec, spec, cfg) {
+async function resolveImageSpec(ctx, exec, spec, cfg, depth = 0) {
   const raw = String(spec).trim()
   if (raw === '') throw new Error('images 中存在空字符串')
   const signal = exec !== undefined && exec !== null ? exec.signal : undefined
+
+  // JSON 图包：显式 json: 前缀，或直接给一个 .json 路径（.json 本身绝不可能是图片）。
+  // 这是「非要用 base64」时的正道：字节留在文件里，agent 的上下文只花掉一行路径。
+  const bundle = raw.match(/^json:(.+)$/iu) !== null
+    ? raw.replace(/^json:/iu, '').trim()
+    : (/\.json(#[\d-]+)?$/iu.test(raw) ? raw : undefined)
+  if (bundle !== undefined) {
+    const hash = bundle.match(/^(.*)#([\d-]+)$/u)
+    const bundlePath = (hash === null ? bundle : hash[1]).replace(/^file:\/\//iu, '')
+    const selector = hash === null ? undefined : hash[2]
+    return resolveBundle(ctx, exec, bundlePath, selector, cfg, depth)
+  }
 
   if (/^https?:\/\//iu.test(raw)) {
     // 公网模型 + 私有地址 = 必然失败，与其让上游回一句难懂的抓取错误，不如当场说清怎么改。
@@ -503,9 +721,11 @@ export function apply(ctx, entry) {
       '把图片交给在线视觉大模型（VLM）"看"，返回它的文字结论。你自己看不到像素，这是你唯一的眼睛。\n'
       + 'prompt 由你自己撰写：说清要判断什么、粒度多细、要什么输出格式（需要程序消费就直接规定 JSON 骨架）。\n'
       + 'images 每一项可以是：本地文件路径 / http(s) URL / data: URL / 会话附件摘要（如 sha256:1a2b3c4d，'
-      + '"[image omitted …]" 占位里的短摘要即可）/ "latest" 或 "latest:N" 取本会话最近上传的图片。\n'
+      + '"[image omitted …]" 占位里的短摘要即可）/ "latest" 或 "latest:N" 取本会话最近上传的图片 / '
+      + '"json:/路径/bundle.json" 读 JSON 图包（可 #2 或 #2-4 选取）。\n'
       + '传图纪律：本地图片直接给路径，插件负责读字节；不要起本地/局域网图片服务再把 URL 给公网模型（它访问不到，必然失败）；'
-      + '远端设备上的图先取回本地；不要自己读 base64 拼 data URL（白白挤占你的上下文和 token）。\n'
+      + '远端设备上的图先取回本地；不要自己读 base64 拼 data URL（白白挤占你的上下文和 token），'
+      + '手里只有 base64 时把它写成 JSON 图包再传路径。\n'
       + '一次调用无记忆，追问请再调一次。当前生效的供应商、模型与已启用的特色能力见系统提示。',
     parameters: {
       type: 'object',
@@ -516,7 +736,8 @@ export function apply(ctx, entry) {
           description:
             '图片来源列表，1 张起。优先用本地路径或会话附件摘要 sha256:xxxx / latest——插件替你读字节，不占你的上下文。'
             + 'http(s) URL 必须是公网可达的；私有地址（127.0.0.1 / 192.168.x.x / 10.x.x.x）公网模型访问不到，会被直接拒绝。'
-            + 'data URL 仅在你手里本来就有 base64 时才用，不要为了传图专门去读一遍。',
+            + '手里只有 base64 时，别拼 data URL：把它写成 JSON 图包再传 "json:/路径/bundle.json"'
+            + '（格式 {"images":[{"data":"<base64>"}]}，可用 #2 / #2-4 选取），这样多少张图都只花掉一行路径的 token。',
         },
         prompt: {
           type: 'string',
@@ -700,7 +921,8 @@ export function apply(ctx, entry) {
         lines.push('')
         lines.push(
           `（提示：本次有约 ${Math.round(inlineChars / 1024)}KB 的 base64 data URL 是你直接拼进参数的，`
-          + '这些字节已经完整占用了你的上下文并计入 token。下次直接传文件路径或 sha256 摘要，'
+          + '这些字节已经完整占用了你的上下文并计入 token。下次直接传文件路径或 sha256 摘要；'
+          + '若手里确实只有 base64，把它写成 JSON 图包 {"images":[{"data":"<base64>"}]} 再传 "json:/路径/bundle.json"，'
           + '插件会自己读字节，你的上下文里只留一行来源。）',
         )
       }

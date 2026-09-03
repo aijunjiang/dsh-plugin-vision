@@ -120,6 +120,7 @@ web profile 是 live-reload：保存补丁文件，**配置改动**（供应商�
 | `C:\pic\a.png`、`/home/u/a.jpg` | 本地文件；经 `ctx.fs` 读取，尊重沙箱与远端路由；无扩展名也能按魔数识别 |
 | `https://…` | 远程 URL，原样交给 VLM 自己抓 |
 | `data:image/png;base64,…` | 直传 |
+| `json:/路径/bundle.json` | **JSON 图包**：base64 存在文件里，一次可带多张，见下节 |
 | `sha256:1a2b3c4d` | 会话附件摘要，**支持前缀**——文本模型占位符里那 8 位就够 |
 | `latest` / `latest:3` | 本会话最近上传的 1 张 / 3 张图 |
 
@@ -137,6 +138,66 @@ web profile 是 live-reload：保存补丁文件，**配置改动**（供应商�
 | 自己 `read` 出 base64 拼成 data URL 传进来 | 传路径，或用 `sha256:` 摘要 / `latest` 点名 | 那串字节会**完整落进 agent 的上下文**，既挤占上下文又白花 token；插件读同一张图不占 agent 一个 token。真塞了大段 base64（≥20000 字符）时，工具会在结果末尾提醒它下次换传法 |
 
 > 例外：当 `baseUrl` 本身就指向本机模型（Ollama / vLLM）时，模型与图片在同一张网里，私有地址是合法的，插件不会拦。
+
+### JSON 图包：手里只有 base64 时的正道
+
+有时确实拿不到文件——远端 API 返回的、数据库字段里的、脚本现算的。这时**不要让 agent 把 base64 打印出来**，
+而是在产生它的那一侧写成 JSON 文件，agent 只传一行路径：
+
+```json
+{
+  "images": [
+    { "name": "首帧", "data": "iVBORw0KGgoAAAANSUhEUg..." },
+    { "name": "尾帧", "data": "iVBORw0KGgoAAAANSUhEUg..." }
+  ]
+}
+```
+
+```
+images: ["json:/tmp/bundle.json"]        整包
+images: ["json:/tmp/bundle.json#2"]      只要第 2 张
+images: ["json:/tmp/bundle.json#2-4"]    第 2 到第 4 张
+```
+
+**省了多少**：实测 3 张 200×150 的 PNG，
+
+| | 字符数 | 约合 token |
+| --- | ---: | ---: |
+| 拼成 data URL 走 `images` | 297,373 | ~74,000 |
+| `json:/tmp/bundle.json` | **75** | **~20** |
+
+模型收到的图**一模一样**，省掉的是 agent 上下文里那份副本。
+
+解析器**刻意写得宽松**（Postel 原则），下面这些生产方写法都认：
+
+| 位置 | 接受的写法 |
+| --- | --- |
+| 顶层 | `{"images":[…]}`、`{"items"/"list"/"data"/"frames":[…]}`、顶层直接是数组、单张时直接一个对象 |
+| 条目 | 对象，或**直接一串 base64 字符串** |
+| 图片字段 | `data` / `base64` / `b64` / `content` / `bytes` / `image` / `dataUrl`；值可带 `data:image/...;base64,` 前缀、可带换行、可是 URL-safe base64 |
+| 替代来源 | `path`（相对路径按 **JSON 文件所在目录**解析）或 `url`（同样受私有地址拦截约束） |
+| 类型 | `mediaType` / `mime` / `type` 等**可以完全省略**——插件按字节魔数嗅探；声明错了以嗅探为准，并在标签里标注 |
+| 名字 | `name` / `label` / `title` / `id` 等，会写进图片标签，方便在 prompt 里用「第 2 张」指代 |
+
+生产方一行就能写出来：
+
+```bash
+# 远端：把当前目录若干 PNG 打成图包
+python3 -c "
+import base64, glob, json
+print(json.dumps({'images':[{'name':p,'data':base64.b64encode(open(p,'rb').read()).decode()} for p in sorted(glob.glob('*.png'))]}))
+" > bundle.json
+```
+
+```js
+// Node：把内存里的 Buffer 直接落盘成图包
+fs.writeFileSync('bundle.json', JSON.stringify({
+  images: buffers.map((b, i) => ({ name: `frame-${i}`, data: b.toString('base64') })),
+}))
+```
+
+约束：单图仍受**单图字节上限**约束，展开后的总张数仍受**单次最多图片数**约束，整包读取上限 128MB；
+图包里不能再引用另一个图包（禁止套娃）。
 
 ### 坐标纪律
 

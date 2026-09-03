@@ -6,6 +6,9 @@
 // 不需要任何真实 API Key，不碰浏览器，也不依赖 DSH 运行时。
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 let mod
 try {
@@ -312,12 +315,124 @@ await test('调用方硬塞大段 base64 时，结果里回敬一条纠正', asy
   reply({ content: 'ok' })
   const out = await analyze.execute({ images: [bulky], prompt: 'p' }, {})
   assert.match(out, /base64 data URL 是你直接拼进参数的/u)
-  assert.match(out, /下次直接传文件路径或 sha256 摘要/u)
+  assert.match(out, /JSON 图包/u, '应指路到 JSON 图包')
   // 小图不该触发唠叨
   reply({ content: 'ok' })
   const quiet = await analyze.execute({ images: [TINY_PNG], prompt: 'p' }, {})
   assert.doesNotMatch(quiet, /直接拼进参数/u)
 })
+
+console.log('JSON 图包:')
+
+const B64 = TINY_PNG.replace(/^data:image\/png;base64,/u, '')
+const tmp = await mkdtemp(join(tmpdir(), 'vision-bundle-'))
+/** 在临时目录写一个图包，返回路径。 */
+async function bundle(name, payload) {
+  const file = join(tmp, name)
+  await writeFile(file, typeof payload === 'string' ? payload : JSON.stringify(payload), 'utf8')
+  return file
+}
+
+await test('标准格式 {"images":[{data,name}]} 多张展开，且不带 base64 进上下文', async () => {
+  const file = await bundle('std.json', {
+    images: [
+      { data: B64, mediaType: 'image/png', name: '首帧' },
+      { data: B64, name: '尾帧' },
+    ],
+  })
+  reply({ content: 'ok' })
+  const out = await analyze.execute({ images: [`json:${file}`], prompt: 'p' }, {})
+  const parts = lastRequest.body.messages[0].content
+  const images = parts.filter(p => p.type === 'image_url')
+  assert.equal(images.length, 2, '两条应展开成两张图')
+  assert.equal(images[0].image_url.url, TINY_PNG, '解码后应还原成同一张图')
+  assert.match(out, /共 2 张图/u)
+  assert.match(out, /首帧/u, '标签应带上条目名，便于模型指代')
+  assert.match(out, /尾帧/u)
+})
+
+await test('宽松解析：顶层数组 / 纯 base64 字符串 / 单对象 / data URL / URL-safe / 带换行', async () => {
+  const shapes = {
+    'arr.json': [{ data: B64 }],
+    'bare.json': [B64],
+    'single.json': { data: B64 },
+    'dataurl.json': { images: [{ data: TINY_PNG }] },
+    'wrapped.json': { images: [{ data: `${B64.slice(0, 20)}\n${B64.slice(20)}` }] },
+    'items.json': { items: [{ b64: B64 }] },
+    'urlsafe.json': { images: [{ data: B64.replace(/\+/gu, '-').replace(/\//gu, '_') }] },
+  }
+  for (const [name, payload] of Object.entries(shapes)) {
+    const file = await bundle(name, payload)
+    reply({ content: 'ok' })
+    await analyze.execute({ images: [`json:${file}`], prompt: 'p' }, {})
+    const images = lastRequest.body.messages[0].content.filter(p => p.type === 'image_url')
+    assert.equal(images.length, 1, `${name} 应解析出 1 张`)
+    assert.equal(images[0].image_url.url, TINY_PNG, `${name} 解码结果应一致`)
+  }
+})
+
+await test('不带 json: 前缀的 .json 路径也走图包解析', async () => {
+  const file = await bundle('implicit.json', { images: [{ data: B64 }] })
+  reply({ content: 'ok' })
+  const out = await analyze.execute({ images: [file], prompt: 'p' }, {})
+  assert.match(out, /JSON 图包/u)
+  assert.doesNotMatch(out, /不是受支持的图片格式/u)
+})
+
+await test('选择子 #2 与 #2-3 精确取图', async () => {
+  const file = await bundle('many.json', {
+    images: [{ data: B64, name: 'a' }, { data: B64, name: 'b' }, { data: B64, name: 'c' }, { data: B64, name: 'd' }],
+  })
+  reply({ content: 'ok' })
+  const one = await analyze.execute({ images: [`json:${file}#2`], prompt: 'p' }, {})
+  assert.match(one, /共 1 张图/u)
+  assert.match(one, /"b"/u, '#2 应取第二条')
+  reply({ content: 'ok' })
+  const range = await analyze.execute({ images: [`json:${file}#2-3`], prompt: 'p' }, {})
+  assert.match(range, /共 2 张图/u)
+  assert.match(range, /"b"/u)
+  assert.match(range, /"c"/u)
+  assert.doesNotMatch(range, /"d"/u)
+})
+
+await test('图包内 path 条目相对 JSON 所在目录解析', async () => {
+  await writeFile(join(tmp, 'pic.png'), Buffer.from(B64, 'base64'))
+  const file = await bundle('rel.json', { images: [{ path: 'pic.png', name: '相对图' }] })
+  reply({ content: 'ok' })
+  const out = await analyze.execute({ images: [`json:${file}`], prompt: 'p' }, {})
+  assert.match(out, /相对图/u)
+  const images = lastRequest.body.messages[0].content.filter(p => p.type === 'image_url')
+  assert.equal(images[0].image_url.url, TINY_PNG)
+})
+
+await test('图包错误逐条说清怎么改', async () => {
+  const cases = [
+    ['broken.json', '{ not json', /不是合法 JSON/u],
+    ['empty.json', { images: [] }, /没有任何图片条目/u],
+    ['nokey.json', { foo: 1 }, /找不到图片列表/u],
+    ['nodata.json', { images: [{ name: 'x' }] }, /找不到图片数据/u],
+    ['notb64.json', { images: [{ data: '不是base64!!' }] }, /不是合法 base64/u],
+    ['notimg.json', { images: [{ data: Buffer.from('hello world').toString('base64') }] }, /不是受支持的图片格式/u],
+    ['oob.json', { images: [{ data: B64 }] }, /超出范围/u, '#9'],
+    ['nest.json', { images: [{ path: 'inner.json' }] }, /不能再引用另一个 JSON 图包/u],
+  ]
+  for (const [name, payload, pattern, suffix] of cases) {
+    const file = await bundle(name, payload)
+    const out = await analyze.execute({ images: [`json:${file}${suffix || ''}`], prompt: 'p' }, {})
+    assert.match(out, pattern, `${name} 的报错应可操作`)
+  }
+  const missing = await analyze.execute({ images: ['json:/definitely/not/here.json'], prompt: 'p' }, {})
+  assert.match(missing, /读不到 JSON 图包/u)
+})
+
+await test('图包同样受单次张数上限约束', async () => {
+  const file = await bundle('toomany.json', { images: Array.from({ length: 5 }, () => ({ data: B64 })) })
+  const few = mount({ provider: 'ark', maxImages: 3 })
+  const out = await few.execute({ images: [`json:${file}`], prompt: 'p' }, {})
+  assert.match(out, /超过单次 3 张上限/u)
+})
+
+await rm(tmp, { recursive: true, force: true })
 
 server.close()
 console.log(`\n✅ ${passed} 项断言全部通过`)
