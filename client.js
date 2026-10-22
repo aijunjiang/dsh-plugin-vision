@@ -446,6 +446,20 @@ window.__ModuleLoader__.load({
       ingestDisabled: '推图端点已关闭，该路径会返回 404。',
       show: '显示',
       hide: '隐藏',
+      oss: 'OSS 中转',
+      ossHint: '宿主机与开发机不在同一局域网时用：签发短时预签名地址，开发机直接上传到 OSS，不需要任何 OSS 凭证。',
+      ossBucket: 'Bucket',
+      ossBucketHint: '对象存储的 bucket 名称。',
+      ossEndpoint: 'Endpoint',
+      ossEndpointHint: '形如 oss-cn-hangzhou.aliyuncs.com，不要带 bucket 前缀和协议。',
+      ossAkId: 'AccessKey ID',
+      ossAkIdHint: '建议用只对该 bucket 有读写权限的 RAM 子账号。',
+      ossAkSecret: 'AccessKey Secret',
+      ossAkSecretHint: '保存后不回显；留空表示沿用已存的值。只存在本机设置里，不会下发给开发机。',
+      ossExpire: '预签名有效期（秒）',
+      ossExpireHint: '签发给开发机的上传地址多久失效。越短越安全，但要留足传输时间。',
+      ossPublicBase: '公网访问前缀',
+      ossPublicBaseHint: '可选。bucket 公共读或绑了 CDN 时填这里，读图就不必每次签名。',
     }
 
     var EN = {
@@ -513,6 +527,20 @@ window.__ModuleLoader__.load({
       ingestDisabled: 'The ingest endpoint is off; this path answers 404.',
       show: 'Show',
       hide: 'Hide',
+      oss: 'OSS relay',
+      ossHint: 'For when the host and dev machines are on different LANs: hand out a short-lived presigned URL; the dev machine uploads straight to OSS with no OSS credentials of its own.',
+      ossBucket: 'Bucket',
+      ossBucketHint: 'The object storage bucket name.',
+      ossEndpoint: 'Endpoint',
+      ossEndpointHint: 'Such as oss-cn-hangzhou.aliyuncs.com — no bucket prefix, no scheme.',
+      ossAkId: 'AccessKey ID',
+      ossAkIdHint: 'Prefer a RAM sub-account limited to this bucket.',
+      ossAkSecret: 'AccessKey Secret',
+      ossAkSecretHint: 'Never echoed back; leave empty to keep the stored value. Stays on this host and is never handed to dev machines.',
+      ossExpire: 'Presign lifetime (seconds)',
+      ossExpireHint: 'How long the upload URL handed to a dev machine stays valid. Shorter is safer; leave enough time to transfer.',
+      ossPublicBase: 'Public base URL',
+      ossPublicBaseHint: 'Optional. Set this when the bucket is public-read or fronted by a CDN, and reads skip signing.',
     }
 
     /** 部署缺少 locale 服务时的兜底：按浏览器语言选词典。 */
@@ -716,6 +744,14 @@ window.__ModuleLoader__.load({
         thinking: values.thinking || 'default',
         maxImages: values.maxImages || 6,
         timeoutMs: values.timeoutMs || 120000,
+        ingestEnabled: values.ingestEnabled !== false,
+        ingestTtlHours: values.ingestTtlHours || 24,
+        ossEnabled: values.ossEnabled === true,
+        ossBucket: values.ossBucket || '',
+        ossEndpoint: values.ossEndpoint || '',
+        ossAccessKeyId: values.ossAccessKeyId || '',
+        ossPublicBase: values.ossPublicBase || '',
+        ossExpireSeconds: values.ossExpireSeconds || 900,
       }
     }
 
@@ -1016,6 +1052,62 @@ window.__ModuleLoader__.load({
             function (v) { patch({ ingestTtlHours: v.replace(/[^0-9]/g, '') }) }, locked),
           t('ingestTtlHint')))
 
+        // ── OSS 中转（局域网互不可达时的第三级通道）────────────────────
+        fields.push(field('vision-oss-enabled', false, t('oss'), null,
+          createElement('label', { style: css.toggleRow, htmlFor: 'vision-oss-enabled' },
+            createElement('input', {
+              id: 'vision-oss-enabled',
+              type: 'checkbox',
+              checked: draft.ossEnabled === true,
+              disabled: locked,
+              onChange: function (e) { patch({ ossEnabled: e.target.checked }) },
+            }),
+            createElement('span', null, draft.ossEnabled === true ? t('ingestOn') : t('ingestOff')),
+          ),
+          t('ossHint')))
+
+        if (draft.ossEnabled === true) {
+          fields.push(field('vision-oss-bucket', false, t('ossBucket'), null,
+            textInput('vision-oss-bucket', draft.ossBucket, 'my-bucket',
+              function (v) { patch({ ossBucket: v.trim() }) }, locked),
+            t('ossBucketHint')))
+
+          fields.push(field('vision-oss-endpoint', false, t('ossEndpoint'), null,
+            textInput('vision-oss-endpoint', draft.ossEndpoint, 'oss-cn-hangzhou.aliyuncs.com',
+              function (v) { patch({ ossEndpoint: v.trim() }) }, locked),
+            t('ossEndpointHint')))
+
+          fields.push(field('vision-oss-akid', false, t('ossAkId'), null,
+            textInput('vision-oss-akid', draft.ossAccessKeyId, 'LTAI…',
+              function (v) { patch({ ossAccessKeyId: v.trim() }) }, locked),
+            t('ossAkIdHint')))
+
+          // Secret 用 password 输入，且同样标了 role('secret')，保存后不回显。
+          fields.push(field('vision-oss-secret', false, t('ossAkSecret'), null,
+            createElement('input', {
+              id: 'vision-oss-secret',
+              style: css.input,
+              type: 'password',
+              autoComplete: 'new-password',
+              spellCheck: false,
+              placeholder: '••••••••',
+              value: draft.ossAccessKeySecret || '',
+              disabled: locked,
+              onChange: function (e) { patch({ ossAccessKeySecret: e.target.value.trim() }) },
+            }),
+            t('ossAkSecretHint')))
+
+          fields.push(field('vision-oss-expire', false, t('ossExpire'), null,
+            textInput('vision-oss-expire', String(draft.ossExpireSeconds), '900',
+              function (v) { patch({ ossExpireSeconds: v.replace(/[^0-9]/g, '') }) }, locked),
+            t('ossExpireHint')))
+
+          fields.push(field('vision-oss-public', false, t('ossPublicBase'), null,
+            textInput('vision-oss-public', draft.ossPublicBase, '',
+              function (v) { patch({ ossPublicBase: v.trim() }) }, locked),
+            t('ossPublicBaseHint')))
+        }
+
         if (preset.docs) {
           fields.push(createElement('p', { style: css.hint, key: 'vision-docs' }, t('docs') + '：' + preset.docs))
         }
@@ -1173,6 +1265,7 @@ window.__ModuleLoader__.load({
         var preset = providerById(valuesOf().provider)
         return preset.keyEnv || 'VISION_API_KEY'
       }
+
       function remoteCreds() {
         return ctx.remote ? ctx.remote.credentials : undefined
       }

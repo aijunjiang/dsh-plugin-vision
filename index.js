@@ -18,6 +18,7 @@ import z from '@deepseek-ai/schemastery'
 import { CAPABILITIES, DEFAULT_PROVIDER, PROVIDERS, capabilityById, providerById } from './catalog.js'
 import { INGEST_PATH, loadOrCreateToken, listInbox, makeIngestRoute, startSweeper } from './ingest.js'
 import { mergeLatestSources } from './fallbacks.js'
+import { buildObjectKey, configProblem, presignPut, resolveOssUrl } from './oss.js'
 
 export { mergeLatestSources }
 
@@ -62,6 +63,14 @@ export const Config = z.object({
   ingestTtlHours: z.number().step(1).min(1).max(720).default(24),
   ingestMaxBytes: z.number().step(1).min(65536).max(67108864).default(32 * 1024 * 1024),
   ingestMaxItems: z.number().step(1).min(1).max(5000).default(200),
+  // ── OSS 中转（第三级通道：局域网互不可达时用）──────────────────────────
+  ossEnabled: z.boolean().default(false),
+  ossAccessKeyId: z.string().default(''),
+  ossAccessKeySecret: z.string().role('secret').default(''),
+  ossBucket: z.string().default(''),
+  ossEndpoint: z.string().default(''),
+  ossPublicBase: z.string().default(''),
+  ossExpireSeconds: z.number().step(1).min(60).max(86400).default(900),
 })
 
 /**
@@ -96,6 +105,30 @@ export function withDefaults(config) {
     ingestTtlHours: int(c.ingestTtlHours, 24),
     ingestMaxBytes: int(c.ingestMaxBytes, 32 * 1024 * 1024),
     ingestMaxItems: int(c.ingestMaxItems, 200),
+    ossEnabled: typeof c.ossEnabled === 'boolean' ? c.ossEnabled : false,
+    ossAccessKeyId: typeof c.ossAccessKeyId === 'string' ? c.ossAccessKeyId : '',
+    ossAccessKeySecret: typeof c.ossAccessKeySecret === 'string' ? c.ossAccessKeySecret : '',
+    ossBucket: typeof c.ossBucket === 'string' ? c.ossBucket : '',
+    ossEndpoint: typeof c.ossEndpoint === 'string' ? c.ossEndpoint : '',
+    ossPublicBase: typeof c.ossPublicBase === 'string' ? c.ossPublicBase : '',
+    ossExpireSeconds: int(c.ossExpireSeconds, 900),
+  }
+}
+
+/**
+ * 从归一化配置里摘出 OSS 需要的那几个字段。
+ * 单独抽出来是因为 oss.js 不该知道插件的整个配置形状。
+ * @param {object} cfg 归一化配置
+ * @returns {object} OSS 配置
+ */
+function ossConfigOf(cfg) {
+  return {
+    accessKeyId: cfg.ossAccessKeyId,
+    accessKeySecret: cfg.ossAccessKeySecret,
+    bucket: cfg.ossBucket,
+    endpoint: cfg.ossEndpoint,
+    publicBase: cfg.ossPublicBase,
+    readExpireSeconds: cfg.ossExpireSeconds,
   }
 }
 
@@ -341,6 +374,61 @@ async function findAttachmentByDigest(hex) {
 }
 
 /**
+ * 从 OSS 读回一张图（宿主机自己发请求，走公网）。
+ *
+ * 为什么不把预签名 GET URL 直接交给 VLM：VLM 在公网、OSS 也在公网，理论上它
+ * 也能抓，但那会让「谁失败、为什么失败」变得不可控——预签名 URL 有效期短，
+ * 上游排队稍久就过期。宿主机先取回字节再上传，失败点收拢在本地，错误信息也直白。
+ *
+ * @param {string} url 预签名 GET 地址
+ * @param {string} spec 原始 oss:// 写法（用于报错定位）
+ * @param {AbortSignal|undefined} signal 中止信号
+ * @param {number} maxBytes 字节上限
+ * @returns {Promise<Array<{url: string, label: string}>>} 解析结果
+ */
+async function fetchOssImage(url, spec, signal, maxBytes) {
+  let response
+  try {
+    response = await fetch(url, { signal })
+  } catch (error) {
+    const message = error !== null && typeof error === 'object' && error.message ? error.message : String(error)
+    throw new Error(
+      `从 OSS 读取 ${spec} 时网络请求失败：${message}`
+      + '——检查宿主机能否访问外网，以及 endpoint 是否拼错。',
+    )
+  }
+  if (!response.ok) {
+    const detail = (await response.text().catch(() => '')).slice(0, 400)
+    const hint = response.status === 404
+      ? '对象不存在：确认开发机确实上传成功，且 object key 与这里一致。'
+      : response.status === 403
+        ? '签名或权限问题：预签名 URL 可能已过期，或 AccessKey 没有该 bucket 的读权限。'
+        : ''
+    throw new Error(`从 OSS 读取 ${spec} 返回 HTTP ${response.status}。${hint}${detail !== '' ? `\n${detail}` : ''}`)
+  }
+
+  const declared = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new Error(`OSS 对象 ${spec} 有 ${declared} 字节，超过单图上限 ${maxBytes}`)
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer())
+  if (bytes.length > maxBytes) {
+    throw new Error(`OSS 对象 ${spec} 有 ${bytes.length} 字节，超过单图上限 ${maxBytes}`)
+  }
+  const mediaType = sniffMediaType(bytes)
+  if (mediaType === undefined) {
+    throw new Error(
+      `OSS 对象 ${spec} 的字节不是受支持的图片格式（PNG/JPEG/WebP/GIF/BMP）。`
+      + '常见原因：上传的是 gzip 压缩流、或上传了非图片文件。',
+    )
+  }
+  return [{
+    url: toDataUrl(bytes, mediaType),
+    label: `OSS ${spec}（${mediaType}，${bytes.length} 字节）`,
+  }]
+}
+
+/**
  * 读取本地文件。优先走 ctx.fs（尊重沙箱与远端映射），回落到 node:fs。
  * @param {object} ctx Cordis 上下文
  * @param {object} exec 工具执行上下文
@@ -348,8 +436,7 @@ async function findAttachmentByDigest(hex) {
  * @param {number} maxBytes 字节上限
  * @returns {Promise<{bytes: Uint8Array, displayPath: string}>} 字节与展示路径
  */
-async function readLocalImage(ctx, exec, path, maxBytes) {
-  const fs = ctx.get('fs')
+async function readLocalImage(ctx, exec, path, maxBytes) {  const fs = ctx.get('fs')
   const signal = exec !== undefined && exec !== null ? exec.signal : undefined
   if (fs !== undefined) {
     const target = await fs.resolve(path, signal !== undefined ? { signal } : {})
@@ -590,6 +677,24 @@ async function resolveImageSpec(ctx, exec, spec, cfg, depth = 0) {
     return resolveBundle(ctx, exec, bundlePath, selector, cfg, depth)
   }
 
+  // OSS 中转：object key 是纯字符串，不需要开发机与宿主机互达。
+  // 宿主机自己把字节从 OSS 读回来，再交给公网 VLM——这一点和 URL 分支不同，
+  // OSS 的 object 对宿主机是可达的（走公网），对 VLM 则根本用不着可达。
+  if (/^oss:\/\//iu.test(raw)) {
+    if (!cfg.ossEnabled) {
+      throw new Error(
+        '收到 oss:// 来源，但 OSS 通道未启用。'
+        + '到「设置 → 插件 → 视觉能力」启用 OSS 并填好 bucket / endpoint / AccessKey。',
+      )
+    }
+    const problem = configProblem(ossConfigOf(cfg))
+    if (problem !== '') {
+      throw new Error(`OSS 通道配置不完整（${problem}），无法读取 ${raw}`)
+    }
+    const url = resolveOssUrl(ossConfigOf(cfg), raw)
+    return await fetchOssImage(url, raw, signal, cfg.maxImageBytes)
+  }
+
   if (/^https?:\/\//iu.test(raw)) {
     // 公网模型 + 私有地址 = 必然失败，与其让上游回一句难懂的抓取错误，不如当场说清怎么改。
     // 但本地部署（Ollama / vLLM）的模型就在同一张网里，这时私有地址是合法的，不能拦。
@@ -758,18 +863,31 @@ export function apply(ctx, entry) {
       text: () => {
         const cfg = current()
         const base = buildPromptSection(cfg)
-        if (!cfg.ingestEnabled) return base
-        // 接收端点开着时，告诉 agent 开发机推上来的图怎么取——否则它只会想到传路径。
-        // 同时也说清退路：局域网不通时不要卡住，直接回到本地路径那条老路。
-        return `${base}\n`
-          + '另外：开发机可以把图片直接推送到本机的接收端点（局域网内多台机器都适用，不需要先拷文件）。'
-          + '推上来的图会以 sha256 摘要入库，用 images:["sha256:<摘要>"] 或 images:["latest"] 就能分析它'
-          + '（latest 同时覆盖接收端点与用户上传的图，接收端点的排在前、用户刚上传的排最后）。'
-          + '不确定有哪些时，先用 vision_list_images 看一眼（它会列出 inbox 里待分析的图）。'
-          + '当用户说「图已经传上去了 / 我推了张图」，直接列 inbox，不要让用户再给一次路径。'
-          + '\n推送是可选通道，不是唯一通道：如果端点不通（局域网断、宿主没起、端口被挡）、'
-          + '或对方机器不方便推，就退回原来的方式——把图片放到宿主机上，直接把本地文件路径写进 images；'
-          + '会话里已有的图用 sha256 摘要或 latest 点名。不要因为推送不了就卡住或反复重试。'
+        if (!cfg.ingestEnabled && !cfg.ossEnabled) return base
+
+        // 通道选择纪律：按「本机 → 局域网 → OSS → 本地路径」逐级降级。
+        // 这段话存在的意义是让 agent 在失败时**知道下一步该试什么**，而不是卡在原地重试，
+        // 也不要一上来就选最麻烦的那条路。
+        const parts = [base, '']
+        parts.push('图送达通道（按顺序选，前一级不通才用下一级，不要跳级、也不要卡在某一级反复重试）：')
+        parts.push('1) 本机磁盘上的图 —— 直接把本地文件路径写进 images。这是最省事的，优先用它。')
+        parts.push('2) 局域网推送 —— 开发机把图推送到本机接收端点（多台机器都适用，不需要先拷文件）。'
+          + '推上来的图以 sha256 摘要入库，用 images:["sha256:<摘要>"] 或 images:["latest"] 就能分析。'
+          + '不确定有哪些时先 vision_list_images（它会列出 inbox）。'
+          + '用户说「图已经传上去了 / 我推了张图」时直接列 inbox，不要让用户再给一次路径。')
+        if (cfg.ossEnabled) {
+          parts.push('3) OSS 中转 —— 宿主机和开发机不在同一个局域网、推送端点不可达时用。'
+            + '调 vision_oss_upload_url 拿一个预签名 PUT 地址（有效期很短），'
+            + '通过 SSH 路由把它交给开发机，让对方用 curl 直传（开发机不需要 OSS 凭证）；'
+            + '确认上传成功后再用 images:["oss://<objectKey>"] 分析。'
+            + '注意这条链路依赖开发机 → OSS 的公网出口，如果那台机器也不能上外网，直接跳到第 4 级。')
+        } else {
+          parts.push('3) OSS 中转 —— 当前未启用。')
+        }
+        parts.push('4) 回到老办法 —— 把图片放到宿主机上，直接传本地文件路径；'
+          + '会话里已有的图用 sha256 摘要或 latest 点名。这是最终可用的兜底，永远不要因为前几级失败就说做不到。')
+        parts.push('任何一级失败，都在回答里说清「试了哪一级、报了什么错、最后用了哪一级」，不要静默降级。')
+        return parts.join('\n')
       },
     })
   })
@@ -1063,6 +1181,79 @@ export function apply(ctx, entry) {
           + '插件会自己读字节，你的上下文里只留一行来源。）',
         )
       }
+      return lines.join('\n')
+    },
+  })
+
+  // ── OSS 中转：签发一次性预签名 URL，让身处另一张网的开发机把图传上来 ──
+  ctx.tools.register({
+    name: 'vision_oss_upload_url',
+    description:
+      '为一张「在别的机器上、两边局域网互不可达」的图片，签发一个阿里云 OSS 的预签名 PUT 地址。\n'
+      + '用途：宿主机与开发机不在同一个局域网、推送端点不可达时，让开发机直接把图传到 OSS，'
+      + '之后用 vision_analyze images=["oss://<objectKey>"] 分析。\n'
+      + '开发机不需要任何 OSS 凭证——把这个 URL 交给它，用 curl 直传即可：\n'
+      + '  curl -X PUT -H "Content-Type: application/octet-stream" --data-binary @shot.png "<url>"\n'
+      + '注意：URL 有效期很短（默认 15 分钟），要尽快用；同一个 URL 重复上传会覆盖同一个对象。\n'
+      + '拿到 objectKey 后可直接传给 vision_analyze，但**先确认上传成功再分析**，否则会读到 404。',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          description: '可选。原始文件名，只用于生成可读的 object key（会被消毒成 ASCII）。',
+        },
+      },
+      required: [],
+    },
+    output: {
+      schema: { type: 'string' },
+      render(_args, value) {
+        return [{ type: 'text', text: value }]
+      },
+    },
+    timeoutMs: 15000,
+    isConcurrencySafe: () => true,
+    async execute(args) {
+      const cfg = current()
+      if (!cfg.ossEnabled) {
+        return '错误：OSS 通道未启用。到「设置 → 插件 → 视觉能力」启用并填写 bucket / endpoint / AccessKey。'
+      }
+      const ossCfg = ossConfigOf(cfg)
+      const problem = configProblem(ossCfg)
+      if (problem !== '') {
+        return `错误：OSS 配置不完整（${problem}）。请在设置卡片里补齐后再试。`
+      }
+
+      const name = typeof args.name === 'string' && args.name.trim() !== '' ? args.name.trim() : 'image'
+      const key = buildObjectKey({ name })
+
+      let presigned
+      try {
+        presigned = presignPut(ossCfg, key, cfg.ossExpireSeconds)
+      } catch (error) {
+        const message = error !== null && typeof error === 'object' && error.message ? error.message : String(error)
+        return `错误：签发预签名 URL 失败：${message}`
+      }
+
+      const mins = Math.round(cfg.ossExpireSeconds / 60)
+      const lines = []
+      lines.push('【OSS 预签名上传地址】')
+      lines.push(`objectKey: ${presigned.key}`)
+      lines.push(`有效期: ${mins} 分钟（到 ${new Date(presigned.expiresAt).toISOString()}）`)
+      lines.push('')
+      lines.push('上传 URL（开发机直接用它，不需要 OSS 凭证）：')
+      lines.push(presigned.url)
+      lines.push('')
+      lines.push('开发机上执行：')
+      lines.push('  curl -X PUT -H "Content-Type: application/octet-stream" \\')
+      lines.push(`    --data-binary @<本地图片路径> "${presigned.url}"`)
+      lines.push('')
+      lines.push('上传成功后，分析这张图：')
+      lines.push(`  vision_analyze images=["oss://${presigned.key}"]`)
+      lines.push('')
+      lines.push('注意：上传前若命令行有 -s，记得加 -f 让 HTTP 错误码暴露出来；'
+        + '返回非 200 就说明没传成功，先别分析。')
       return lines.join('\n')
     },
   })
