@@ -864,6 +864,17 @@ window.__ModuleLoader__.load({
           thinking: draft.thinking,
           maxImages: Number(draft.maxImages) || 6,
           timeoutMs: Number(draft.timeoutMs) || 120000,
+          // 推图端点与 OSS 中转的字段必须一起提交。漏掉它们的后果不是报错，
+          // 而是「填了、点了保存、值被静默丢弃」——用户以为配好了，实际什么都没写进去。
+          ingestEnabled: draft.ingestEnabled !== false,
+          ingestTtlHours: Number(draft.ingestTtlHours) || 24,
+          ossEnabled: draft.ossEnabled === true,
+          ossBucket: (draft.ossBucket || '').replace(/^\s+|\s+$/g, ''),
+          ossEndpoint: (draft.ossEndpoint || '').replace(/^\s+|\s+$/g, ''),
+          ossAccessKeyId: (draft.ossAccessKeyId || '').replace(/^\s+|\s+$/g, ''),
+          ossAccessKeySecret: draft.ossAccessKeySecret || '',
+          ossPublicBase: (draft.ossPublicBase || '').replace(/^\s+|\s+$/g, ''),
+          ossExpireSeconds: Number(draft.ossExpireSeconds) || 900,
         })
         var key = keyText.replace(/^\s+|\s+$/g, '')
         work = work.then(function (res) {

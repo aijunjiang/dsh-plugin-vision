@@ -27,7 +27,7 @@
   },
   "scripts": {
     "sync": "node scripts/sync-catalog.mjs",
-    "test": "node tests/session-images.test.mjs && node tests/execute.test.mjs && node tests/ingest.test.mjs && node tests/latest-and-fallback.test.mjs && node tests/oss.test.mjs && node tests/oss-flow.test.mjs && node tests/client-card.test.cjs",
+    "test": "node tests/session-images.test.mjs && node tests/execute.test.mjs && node tests/ingest.test.mjs && node tests/latest-and-fallback.test.mjs && node tests/oss.test.mjs && node tests/oss-flow.test.mjs && node tests/config-parity.test.mjs && node tests/client-card.test.cjs",
     "check": "node --check index.js && node --check catalog.js && node --check client.js && node --check ingest.js && node --check fallbacks.js && node --check oss.js && node scripts/sync-catalog.mjs --check && npm test"
   },
   "license": "MIT",
