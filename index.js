@@ -18,7 +18,8 @@ import z from '@deepseek-ai/schemastery'
 import { CAPABILITIES, DEFAULT_PROVIDER, PROVIDERS, capabilityById, providerById } from './catalog.js'
 import { INGEST_PATH, loadOrCreateToken, listInbox, makeIngestRoute, startSweeper } from './ingest.js'
 import { mergeLatestSources } from './fallbacks.js'
-import { buildObjectKey, configProblem, presignPut, resolveOssUrl } from './oss.js'
+import { buildObjectKey, configProblem, presignPut, resolveOssUrl, deleteObject } from './oss.js'
+import { runDueDeletes, scheduleDelete, startOssSweeper } from './oss-cleanup.js'
 
 export { mergeLatestSources }
 
@@ -71,6 +72,10 @@ export const Config = z.object({
   ossEndpoint: z.string().default(''),
   ossPublicBase: z.string().default(''),
   ossExpireSeconds: z.number().step(1).min(60).max(86400).default(900),
+  // ── OSS 用完即删 ──────────────────────────────────────────────────────
+  // 分析成功后把对象删掉。延迟是为了让「换个 prompt 再问一次」不至于立刻 404。
+  ossDeleteAfterAnalyze: z.boolean().default(true),
+  ossDeleteDelaySeconds: z.number().step(1).min(0).max(86400).default(300),
 })
 
 /**
@@ -112,6 +117,8 @@ export function withDefaults(config) {
     ossEndpoint: typeof c.ossEndpoint === 'string' ? c.ossEndpoint : '',
     ossPublicBase: typeof c.ossPublicBase === 'string' ? c.ossPublicBase : '',
     ossExpireSeconds: int(c.ossExpireSeconds, 900),
+    ossDeleteAfterAnalyze: typeof c.ossDeleteAfterAnalyze === 'boolean' ? c.ossDeleteAfterAnalyze : true,
+    ossDeleteDelaySeconds: int(c.ossDeleteDelaySeconds, 300),
   }
 }
 
@@ -425,6 +432,8 @@ async function fetchOssImage(url, spec, signal, maxBytes) {
   return [{
     url: toDataUrl(bytes, mediaType),
     label: `OSS ${spec}（${mediaType}，${bytes.length} 字节）`,
+    // 记下 key，方便分析完成后登记延迟删除；不代表「已删」，只是待办。
+    ossKey: spec.replace(/^oss:\/\//iu, ''),
   }]
 }
 
@@ -436,7 +445,8 @@ async function fetchOssImage(url, spec, signal, maxBytes) {
  * @param {number} maxBytes 字节上限
  * @returns {Promise<{bytes: Uint8Array, displayPath: string}>} 字节与展示路径
  */
-async function readLocalImage(ctx, exec, path, maxBytes) {  const fs = ctx.get('fs')
+async function readLocalImage(ctx, exec, path, maxBytes) {
+  const fs = ctx.get('fs')
   const signal = exec !== undefined && exec !== null ? exec.signal : undefined
   if (fs !== undefined) {
     const target = await fs.resolve(path, signal !== undefined ? { signal } : {})
@@ -918,6 +928,33 @@ export function apply(ctx, entry) {
     })()
   })
 
+  // ── OSS 用完即删：周期性执行到期的删除 ─────────────────────────────────
+  // 待删清单落盘，所以进程重启后也能接着删——否则那些图会永远留在 OSS 上。
+  // 每 60 秒扫一次；失败不清记录，下次重试。
+  ctx.effect(() => {
+    const tick = async () => {
+      const cfg = current()
+      if (!cfg.ossEnabled || !cfg.ossDeleteAfterAnalyze) return
+      const ossCfg = ossConfigOf(cfg)
+      if (configProblem(ossCfg) !== '') return
+      try {
+        const result = await runDueDeletes({ remove: key => deleteObject(ossCfg, key) })
+        if (result.deleted.length > 0) {
+          ctx.logger?.info?.(`[vision] 已删除 ${result.deleted.length} 个 OSS 对象`)
+        }
+        for (const miss of result.failed) {
+          ctx.logger?.warn?.(`[vision] 删除 OSS 对象失败 ${miss.key}：${miss.reason}`)
+        }
+      } catch (error) {
+        ctx.logger?.warn?.(`[vision] OSS 清理失败：${String((error && error.message) || error)}`)
+      }
+    }
+    // 启动时先跑一次，清掉上次进程遗留的待删项
+    void tick()
+    const stop = startOssSweeper({ tick, intervalMs: 60_000 })
+    return () => stop()
+  })
+
   // 设置卡片读完这段就能显示「端点地址 + 令牌 + 一条可直接复制的 curl」。
   // authority 定为 loopback：只有本机的界面能读，局域网里其他机器读不到。
   ctx.inject(['connection'], (connCtx) => {
@@ -1181,11 +1218,34 @@ export function apply(ctx, entry) {
           + '插件会自己读字节，你的上下文里只留一行来源。）',
         )
       }
+      // 分析已经成功（正文非空、HTTP 2xx）。此时把本次读过的 OSS 对象登记为延迟删除。
+      // 放在这里而不是读完就删，是因为同一次调用可能读多张、也可能马上被重试；
+      // 等分析真正落地再删，既省钱又不会让重试读到 404。
+      const ossKeys = resolved.map(item => item.ossKey).filter(key => typeof key === 'string' && key !== '')
+      if (ossKeys.length > 0 && cfg.ossEnabled && cfg.ossDeleteAfterAnalyze) {
+        const deleteAfter = Date.now() + Math.max(0, cfg.ossDeleteDelaySeconds) * 1000
+        const scheduled = []
+        for (const key of ossKeys) {
+          try {
+            await scheduleDelete({ key, deleteAfter, scheduledAt: Date.now() })
+            scheduled.push(key)
+          } catch {
+            // 登记失败不影响本次分析结果；把它写进返回里，免得静默漏删
+          }
+        }
+        if (scheduled.length > 0) {
+          const mins = Math.round(cfg.ossDeleteDelaySeconds / 60)
+          lines.push('')
+          lines.push(
+            `（OSS 清理：本次读取的 ${scheduled.length} 个对象已登记，将在 ${mins > 0 ? `${mins} 分钟后` : '稍后'}自动删除。`
+            + '如果还要再问这张图，请在删除前完成；删掉之后再读会得到 404。）',
+          )
+        }
+      }
       return lines.join('\n')
     },
   })
 
-  // ── OSS 中转：签发一次性预签名 URL，让身处另一张网的开发机把图传上来 ──
   ctx.tools.register({
     name: 'vision_oss_upload_url',
     description:

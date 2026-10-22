@@ -460,6 +460,10 @@ window.__ModuleLoader__.load({
       ossExpireHint: '签发给开发机的上传地址多久失效。越短越安全，但要留足传输时间。',
       ossPublicBase: '公网访问前缀',
       ossPublicBaseHint: '可选。bucket 公共读或绑了 CDN 时填这里，读图就不必每次签名。',
+      ossDelete: '分析后自动删除',
+      ossDeleteHint: '分析成功后把这个对象从 OSS 删掉，避免图长期堆积。注意 OSS 存储按最小月周期计费，删除省的是「不再堆积」，不会让当月账单归零——真正的大头是公网流出流量。',
+      ossDeleteDelay: '删除延迟（秒）',
+      ossDeleteDelayHint: '留一段重试窗口：这段时间内再问同一张图还能读到，过后就 404 了。默认 300 秒。',
     }
 
     var EN = {
@@ -541,6 +545,10 @@ window.__ModuleLoader__.load({
       ossExpireHint: 'How long the upload URL handed to a dev machine stays valid. Shorter is safer; leave enough time to transfer.',
       ossPublicBase: 'Public base URL',
       ossPublicBaseHint: 'Optional. Set this when the bucket is public-read or fronted by a CDN, and reads skip signing.',
+      ossDelete: 'Delete after analysis',
+      ossDeleteHint: 'Remove the object from OSS once analysis succeeds, so images do not pile up. Note OSS bills storage in one-month minimum periods — deleting stops the pile-up but does not zero the current bill; public egress is the real cost.',
+      ossDeleteDelay: 'Delete delay (seconds)',
+      ossDeleteDelayHint: 'A retry window: the same image stays readable this long after analysis, then 404s. Default 300s.',
     }
 
     /** 部署缺少 locale 服务时的兜底：按浏览器语言选词典。 */
@@ -752,6 +760,8 @@ window.__ModuleLoader__.load({
         ossAccessKeyId: values.ossAccessKeyId || '',
         ossPublicBase: values.ossPublicBase || '',
         ossExpireSeconds: values.ossExpireSeconds || 900,
+        ossDeleteAfterAnalyze: values.ossDeleteAfterAnalyze !== false,
+        ossDeleteDelaySeconds: values.ossDeleteDelaySeconds === undefined ? 300 : values.ossDeleteDelaySeconds,
       }
     }
 
@@ -875,6 +885,8 @@ window.__ModuleLoader__.load({
           ossAccessKeySecret: draft.ossAccessKeySecret || '',
           ossPublicBase: (draft.ossPublicBase || '').replace(/^\s+|\s+$/g, ''),
           ossExpireSeconds: Number(draft.ossExpireSeconds) || 900,
+          ossDeleteAfterAnalyze: draft.ossDeleteAfterAnalyze !== false,
+          ossDeleteDelaySeconds: Number(draft.ossDeleteDelaySeconds) || 0,
         })
         var key = keyText.replace(/^\s+|\s+$/g, '')
         work = work.then(function (res) {
@@ -1117,6 +1129,28 @@ window.__ModuleLoader__.load({
             textInput('vision-oss-public', draft.ossPublicBase, '',
               function (v) { patch({ ossPublicBase: v.trim() }) }, locked),
             t('ossPublicBaseHint')))
+
+          // 用完即删：省的是「图长期堆积」的存储与后续流量，不是当月账单归零
+          //（OSS 存储按最小月周期计费）。延迟是为了让「换个 prompt 再问一次」不被 404 打断。
+          fields.push(field('vision-oss-delete', false, t('ossDelete'), null,
+            createElement('label', { style: css.toggleRow, htmlFor: 'vision-oss-delete' },
+              createElement('input', {
+                id: 'vision-oss-delete',
+                type: 'checkbox',
+                checked: draft.ossDeleteAfterAnalyze !== false,
+                disabled: locked,
+                onChange: function (e) { patch({ ossDeleteAfterAnalyze: e.target.checked }) },
+              }),
+              createElement('span', null, draft.ossDeleteAfterAnalyze !== false ? t('ingestOn') : t('ingestOff')),
+            ),
+            t('ossDeleteHint')))
+
+          if (draft.ossDeleteAfterAnalyze !== false) {
+            fields.push(field('vision-oss-delete-delay', false, t('ossDeleteDelay'), null,
+              textInput('vision-oss-delete-delay', String(draft.ossDeleteDelaySeconds), '300',
+                function (v) { patch({ ossDeleteDelaySeconds: v.replace(/[^0-9]/g, '') }) }, locked),
+              t('ossDeleteDelayHint')))
+          }
         }
 
         if (preset.docs) {

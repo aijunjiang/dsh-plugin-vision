@@ -153,6 +153,87 @@ export function presignGet(cfg, key, expiresIn = DEFAULT_EXPIRE_SECONDS) {
 }
 
 /**
+ * 签发任意方法的预签名 URL（GET / DELETE / PUT 等）。
+ *
+ * 三种方法共用一套签名结构，差别只在 VERB 与 Content-Type 位：
+ *  - GET / DELETE 没有 body，Content-Type 留空
+ *  - PUT 必须与上传时的 Content-Type 一致，否则 SignatureDoesNotMatch
+ *
+ * @param {object} cfg OSS 配置
+ * @param {string} method HTTP 方法
+ * @param {string} key object key
+ * @param {number} expiresIn 有效期秒数
+ * @param {string} [contentType] PUT 时需要的 Content-Type
+ * @returns {{url: string, key: string, expiresAt: number}} 预签名结果
+ */
+export function presign(cfg, method, key, expiresIn = DEFAULT_EXPIRE_SECONDS, contentType = '') {
+  const normalized = normalizeKey(key)
+  const expiresAt = Math.floor(Date.now() / 1000) + expiresIn
+  const canonicalizedResource = `/${cfg.bucket}/${normalized}`
+  const signature = signOss({
+    method,
+    contentMd5: '',
+    contentType,
+    date: String(expiresAt),
+    canonicalizedResource,
+    secret: cfg.accessKeySecret,
+  })
+  const query = [
+    `OSSAccessKeyId=${uriEncode(cfg.accessKeyId)}`,
+    `Expires=${expiresAt}`,
+    `Signature=${uriEncode(signature)}`,
+  ].join('&')
+  return {
+    url: `${bucketBase(cfg)}/${uriEncode(normalized).replace(/%2F/gu, '/')}?${query}`,
+    key: normalized,
+    expiresAt: expiresAt * 1000,
+  }
+}
+
+/**
+ * 签发预签名 DELETE URL——用完即删的那一步。
+ * @param {object} cfg OSS 配置
+ * @param {string} key object key
+ * @param {number} [expiresIn] 有效期秒数
+ * @returns {{url: string, key: string, expiresAt: number}} 预签名结果
+ */
+export function presignDelete(cfg, key, expiresIn = 300) {
+  return presign(cfg, 'DELETE', key, expiresIn, '')
+}
+
+/**
+ * 立刻删除一个对象。
+ *
+ * OSS 的 DELETE 是幂等的：对象不存在也返回 204，所以重复调用安全。
+ * 这一点让「延迟删除」可以有多个冗余触发点而不会互相干扰。
+ *
+ * @param {object} cfg OSS 配置
+ * @param {string} key object key
+ * @param {object} [options] 选项
+ * @param {AbortSignal} [options.signal] 中止信号
+ * @returns {Promise<{deleted: boolean, status: number, reason?: string}>} 删除结果
+ */
+export async function deleteObject(cfg, key, options = {}) {
+  const { url } = presignDelete(cfg, key)
+  let response
+  try {
+    response = await fetch(url, { method: 'DELETE', signal: options.signal })
+  } catch (error) {
+    const message = error !== null && typeof error === 'object' && error.message ? error.message : String(error)
+    return { deleted: false, status: 0, reason: `网络请求失败：${message}` }
+  }
+  // 204 = 删除成功（对象本来就不存在时 OSS 也回 204，幂等）
+  if (response.status === 204 || response.status === 200) {
+    return { deleted: true, status: response.status }
+  }
+  const detail = (await response.text().catch(() => '')).slice(0, 300)
+  const hint = response.status === 403
+    ? '签名或权限问题：当前 AccessKey 可能没有该 bucket 的 DeleteObject 权限。'
+    : ''
+  return { deleted: false, status: response.status, reason: `${hint}${detail}`.trim() }
+}
+
+/**
  * 把 oss:// 或 object key 解析成实际可下载的地址。
  *
  * 优先用预签名 GET（bucket 私有时可读）；若配置了 publicBase，
