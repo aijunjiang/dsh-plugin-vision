@@ -225,6 +225,46 @@ async function countInbox() {
 }
 
 /**
+ * 从请求 URL 里取 ?name= 参数，永远不抛。
+ *
+ * 走两遍：先让标准 URL 解析（能正确处理已编码的 %E4%BD%A0），失败就退化成
+ * 手动切字符串——开发机的文件名常常是中文且未经 URL 编码，`new URL()` 会直接
+ * 抛 Invalid URL。那个异常如果漏到 handler 外面，连接被断开，客户端只看到空响应，
+ * 排查成本极高。
+ *
+ * @param {string|undefined} rawUrl 原始请求路径
+ * @returns {string} 文件名（已 trim、截断到 200 字符）；取不到则为空串
+ */
+function parseName(rawUrl) {
+  const fallback = () => {
+    const query = String(rawUrl || '').split('?')[1]
+    if (query === undefined) return ''
+    for (const pair of query.split('&')) {
+      const eq = pair.indexOf('=')
+      if (eq < 0) continue
+      if (pair.slice(0, eq) !== 'name') continue
+      const value = pair.slice(eq + 1)
+      try {
+        // decodeURIComponent 处理 %XX；裸中文原样保留
+        return decodeURIComponent(value).trim().slice(0, 200)
+      } catch {
+        // 编码残缺（比如孤立的 %）就当原文用
+        return value.trim().slice(0, 200)
+      }
+    }
+    return ''
+  }
+  try {
+    const url = new URL(String(rawUrl || INGEST_PATH), 'http://localhost')
+    const value = url.searchParams.get('name')
+    if (value === null) return ''
+    return value.trim().slice(0, 200)
+  } catch {
+    return fallback()
+  }
+}
+
+/**
  * 构造接收路由的 handler。
  *
  * 配置字段名与 withDefaults 的产出保持一致（ingestEnabled / ingestTtlHours /
@@ -270,8 +310,10 @@ export function makeIngestRoute(ctx, options) {
         return
       }
 
-      const url = new URL(String(req.url || INGEST_PATH), 'http://localhost')
-      const name = (url.searchParams.get('name') || '').trim().slice(0, 200)
+      // ?name= 可能是中文（开发机的文件名），而 curl 常把原样字节塞进 query。
+      // new URL() 遇到未转义的非 ASCII 会抛 Invalid URL——那不是「请求不合法」，
+      // 而是「文件名不好解析」，绝不能让它把连接弄断（表现为空响应）。
+      const name = parseName(req.url)
 
       let bytes
       try {
@@ -375,3 +417,6 @@ export function startSweeper(intervalMs) {
 }
 
 export { dshHome, META_DIR }
+
+// 仅供测试：?name= 解析器不依赖宿主，值得单独覆盖（它曾经把连接弄断过）。
+export { parseName as parseNameForTest }

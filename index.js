@@ -17,6 +17,9 @@ import z from '@deepseek-ai/schemastery'
 
 import { CAPABILITIES, DEFAULT_PROVIDER, PROVIDERS, capabilityById, providerById } from './catalog.js'
 import { INGEST_PATH, loadOrCreateToken, listInbox, makeIngestRoute, startSweeper } from './ingest.js'
+import { mergeLatestSources } from './fallbacks.js'
+
+export { mergeLatestSources }
 
 /** Cordis 插件名（loader 诊断用）。 */
 export const name = 'vision'
@@ -120,7 +123,11 @@ export function buildPromptSection(cfg) {
   const lines = []
   lines.push(
     `You have vision through the vision_analyze tool: it sends images to an online vision model (${provider.label} / ${model || '未配置模型'}) and returns that model's written answer.`
-    + ' You cannot see pixels yourself — this tool is your only eye. Write the observation prompt yourself: state exactly what you need judged, at what granularity, and in what output shape.',
+    // 别把这句话写成「唯一」：主模型本身支持图像输入时，read_image 能直接把图交给
+    // 它自己看，两条路并存。只有主模型是纯文本时，这条才是唯一通道。
+    + ' When your own model accepts image input, read_image can hand an image to you directly — use that in preference to this tool.'
+    + ' When your model is text-only you cannot see pixels at all, and this tool is your only eye.'
+    + ' Either way, write the observation prompt yourself: state exactly what you need judged, at what granularity, and in what output shape.',
   )
   lines.push(
     'Image sources accepted by the images array: a local file path, an http(s) URL, a data: URL,'
@@ -609,18 +616,39 @@ async function resolveImageSpec(ctx, exec, spec, cfg, depth = 0) {
 
   const latest = raw.match(/^latest(?::(\d+))?$/iu)
   if (latest !== null) {
+    // latest 覆盖两个来源：会话附件（用户在输入框上传的）+ 接收端点 inbox（开发机推的）。
+    // 只认前一个来源的话，agent 明明在 vision_list_images 里看到了 inbox，写 latest
+    // 却拿不到图——静默的空结果比报错更难查。
     const want = latest[1] === undefined ? 1 : Math.min(Number(latest[1]), cfg.maxImages)
-    const refs = sessionImageRefs(exec)
-    if (refs.length === 0) throw new Error('当前会话里没有找到任何图片附件（用户还没上传，或该会话未携带图片）')
-    const picked = refs.slice(Math.max(0, refs.length - want))
+    const sessionRefs = sessionImageRefs(exec)
+
+    let inboxItems = []
+    if (cfg.ingestEnabled) {
+      try {
+        inboxItems = await listInbox()
+      } catch {
+        inboxItems = []
+      }
+    }
+
+    const ordered = mergeLatestSources(sessionRefs, inboxItems)
+    if (ordered.length === 0) {
+      throw new Error(
+        '当前会话里没有找到任何图片附件，接收端点 inbox 里也没有待分析的图。'
+        + '让用户在输入框上传图片、把本地路径/URL 写进 images，或让开发机把图推送到接收端点。',
+      )
+    }
+    const picked = ordered.slice(Math.max(0, ordered.length - want))
     const out = []
-    for (const ref of picked) {
+    for (const item of picked) {
+      const ref = item.ref
       const { bytes, mediaType } = await readAttachmentRef(ctx, ref, signal)
       const digest = String(ref.attachmentId).replace(/^sha256:/u, '').slice(0, 12)
       const dims = ref.width !== undefined && ref.height !== undefined ? `，${ref.width}x${ref.height}px` : ''
+      const origin = item.kind === 'inbox' ? '接收端点' : '会话附件'
       out.push({
         url: toDataUrl(bytes, mediaType),
-        label: `会话附件 ${ref.name !== undefined ? `"${ref.name}" ` : ''}sha256:${digest}（${mediaType}${dims}，${bytes.length} 字节）`,
+        label: `${origin} ${ref.name !== undefined ? `"${ref.name}" ` : ''}sha256:${digest}（${mediaType}${dims}，${bytes.length} 字节）`,
       })
     }
     return out
@@ -654,13 +682,36 @@ async function resolveImageSpec(ctx, exec, spec, cfg, depth = 0) {
   }
 
   const path = raw.replace(/^file:\/\//iu, '')
-  const { bytes, displayPath } = await readLocalImage(ctx, exec, path, cfg.maxImageBytes)
+  let bytes
+  let displayPath
+  try {
+    const read = await readLocalImage(ctx, exec, path, cfg.maxImageBytes)
+    bytes = read.bytes
+    displayPath = read.displayPath
+  } catch (error) {
+    // 本地路径也读不到，通常意味着「本以为在宿主机上、其实在开发机上」。
+    // 这里把两条路都摆出来，让 agent 明确知道该退化到哪种方式。
+    const message = error !== null && typeof error === 'object' && error.message ? error.message : String(error)
+    const hint = cfg.ingestEnabled
+      ? '\n注意这个路径可能在开发机上，而不在宿主机上——本地路径只能读宿主机自己的盘。'
+        + '若图片在局域网另一台机器上，两条路任选：'
+        + '\n  (a) 让那台机器推送到接收端点，拿到 sha256 摘要后用 images:["sha256:<摘要>"]；'
+        + '\n  (b) 把文件传到宿主机上，再传宿主机的本地路径。'
+        + '\n如果推送端点本身不可达（端口不通/服务没起），退回 (b)。'
+      : ''
+    throw new Error(`读不到 "${path}"：${message}${hint}`)
+  }
   const mediaType = sniffMediaType(bytes)
   if (mediaType === undefined) {
     throw new Error(`"${displayPath}" 的字节不是受支持的图片格式（PNG/JPEG/WebP/GIF/BMP）`)
   }
   return [{ url: toDataUrl(bytes, mediaType), label: `本地文件 ${displayPath}（${mediaType}，${bytes.length} 字节）` }]
 }
+
+/**
+ * 把两个 latest 来源合并成一条「旧 → 新」的时间线。
+ * 实现在 fallbacks.js（纯逻辑、可脱离 schemastery 单测），这里只做再导出。
+ */
 
 // ---------------------------------------------------------------- 调用与格式化
 
@@ -709,11 +760,16 @@ export function apply(ctx, entry) {
         const base = buildPromptSection(cfg)
         if (!cfg.ingestEnabled) return base
         // 接收端点开着时，告诉 agent 开发机推上来的图怎么取——否则它只会想到传路径。
+        // 同时也说清退路：局域网不通时不要卡住，直接回到本地路径那条老路。
         return `${base}\n`
           + '另外：开发机可以把图片直接推送到本机的接收端点（局域网内多台机器都适用，不需要先拷文件）。'
-          + `推上来的图会以 sha256 摘要入库，用 images:["sha256:<摘要>"] 或 images:["latest"] 就能分析它；`
+          + '推上来的图会以 sha256 摘要入库，用 images:["sha256:<摘要>"] 或 images:["latest"] 就能分析它'
+          + '（latest 同时覆盖接收端点与用户上传的图，接收端点的排在前、用户刚上传的排最后）。'
           + '不确定有哪些时，先用 vision_list_images 看一眼（它会列出 inbox 里待分析的图）。'
           + '当用户说「图已经传上去了 / 我推了张图」，直接列 inbox，不要让用户再给一次路径。'
+          + '\n推送是可选通道，不是唯一通道：如果端点不通（局域网断、宿主没起、端口被挡）、'
+          + '或对方机器不方便推，就退回原来的方式——把图片放到宿主机上，直接把本地文件路径写进 images；'
+          + '会话里已有的图用 sha256 摘要或 latest 点名。不要因为推送不了就卡住或反复重试。'
       },
     })
   })
@@ -1044,16 +1100,20 @@ export function apply(ctx, entry) {
         })
       }
 
-      // inbox：开发机通过接收端点点对点推上来的图，不在会话事件里，必须单独列。
+      // inbox：开发机通过接收端点推上来的图，不在会话事件里，必须单独列。
       const cfg = current()
       if (cfg.ingestEnabled) {
         let inbox = []
+        let inboxError = null
         try {
           inbox = await listInbox()
-        } catch {
-          inbox = []
+        } catch (error) {
+          inboxError = error !== null && typeof error === 'object' && error.message ? error.message : String(error)
         }
-        if (inbox.length > 0) {
+        if (inboxError !== null) {
+          lines.push('')
+          lines.push(`接收端点 inbox：读取失败（${inboxError}）。若推送也失败，说明通道不通，改用本地路径。`)
+        } else if (inbox.length > 0) {
           lines.push('')
           lines.push(`接收端点 inbox：另有 ${inbox.length} 张由开发机推送上来的图（新 → 旧）：`)
           inbox.slice(0, 30).forEach((item, index) => {
@@ -1071,12 +1131,17 @@ export function apply(ctx, entry) {
         } else {
           lines.push('')
           lines.push('接收端点 inbox：目前没有待分析的推送图片。')
+          lines.push('如果对方说「已经推了」却看不到图，说明推送没成功——改用本地路径：把图放到宿主机上，直接传路径。')
         }
       }
 
       lines.push('')
       lines.push('用法：vision_analyze images=["sha256:<上面的摘要>"] 或 images=["latest"]，prompt 由你自己撰写。')
-      lines.push('注意：inbox 里的图不在会话事件里，"latest" 取不到它们——必须用 sha256 摘要点名。')
+      lines.push('latest 同时覆盖会话附件与接收端点 inbox（接收端点的排在前、用户刚上传的排最后）；'
+        + '要精确点名某一张，用 sha256 摘要最稳。')
+      if (refs.length === 0 && !cfg.ingestEnabled) {
+        lines.push('接收端点当前已关闭，只剩本地路径这一条通道。')
+      }
       return lines.join('\n')
     },
   })
