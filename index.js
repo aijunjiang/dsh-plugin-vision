@@ -731,6 +731,7 @@ export function apply(ctx, entry) {
         return
       }
       const dispose = webCtx.webServer.register(makeIngestRoute(ctx, {
+        // current() 已过 withDefaults，ingest* 键总是齐的；ingest.js 侧只做兜底。
         config: () => current(),
         token: () => ingestToken,
       }))

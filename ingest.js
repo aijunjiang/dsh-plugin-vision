@@ -226,6 +226,12 @@ async function countInbox() {
 
 /**
  * 构造接收路由的 handler。
+ *
+ * 配置字段名与 withDefaults 的产出保持一致（ingestEnabled / ingestTtlHours /
+ * ingestMaxBytes / ingestMaxItems）。之前的版本这里读的是 enabled / ttlHours /
+ * maxIngestBytes / maxInboxItems，对不上，导致端点永远判为「已关闭」——字段名
+ * 必须与配置层逐字一致，否则 undefined 会让默认值悄悄失效。
+ *
  * @param {object} ctx Cordis 上下文
  * @param {object} options 选项
  * @param {() => object} options.config 取当前配置
@@ -237,7 +243,13 @@ export function makeIngestRoute(ctx, options) {
     kind: 'exact',
     path: INGEST_PATH,
     async handler(req, res) {
-      const cfg = options.config()
+      const raw = options.config()
+      const cfg = {
+        enabled: raw.ingestEnabled !== false,
+        ttlHours: Number.isFinite(raw.ingestTtlHours) ? raw.ingestTtlHours : 24,
+        maxIngestBytes: Number.isFinite(raw.ingestMaxBytes) ? raw.ingestMaxBytes : 32 * 1024 * 1024,
+        maxInboxItems: Number.isFinite(raw.ingestMaxItems) ? raw.ingestMaxItems : 200,
+      }
 
       if (!cfg.enabled) {
         sendJson(res, 404, { ok: false, error: 'vision ingest endpoint is disabled' })

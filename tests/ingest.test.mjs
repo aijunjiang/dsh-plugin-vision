@@ -77,12 +77,54 @@ async function serve(config, token, attachments) {
   }
 }
 
+// 与 index.js 的 withDefaults 产出逐字对齐。
+// 这里曾经用 enabled / ttlHours / maxIngestBytes / maxInboxItems，而实现读的是
+// ingestEnabled / ingestTtlHours / ingestMaxBytes / ingestMaxItems —— 两边同时用错
+// 名字，测试全绿，线上端点却永远判为「已关闭」。字段名必须与配置层一致。
 const baseConfig = {
-  enabled: true,
-  ttlHours: 24,
-  maxIngestBytes: 1024 * 1024,
-  maxInboxItems: 5,
+  ingestEnabled: true,
+  ingestTtlHours: 24,
+  ingestMaxBytes: 1024 * 1024,
+  ingestMaxItems: 5,
 }
+
+await test('配置字段名与 withDefaults 对齐（回归：字段名错配会让端点永远 404）', async () => {
+  // 只给 withDefaults 那套键名、一个都不少，端点必须判定为「开启」。
+  // 若实现又去读 enabled / ttlHours 之类不存在的键，这里会拿到 404。
+  const app = await serve({
+    ingestEnabled: true,
+    ingestTtlHours: 1,
+    ingestMaxBytes: 1024 * 1024,
+    ingestMaxItems: 100,
+  }, 'aligned-token', fakeAttachments())
+  try {
+    const res = await fetch(app.url, {
+      method: 'POST',
+      headers: { authorization: 'Bearer aligned-token' },
+      body: PNG,
+    })
+    assert.equal(res.status, 201, '字段名对齐时端点应正常工作')
+  } finally {
+    await app.close()
+  }
+})
+
+await test('缺少 ingest* 键时按默认值兜底（开启、24h）', async () => {
+  const app = await serve({}, 'default-token', fakeAttachments())
+  try {
+    const res = await fetch(app.url, {
+      method: 'POST',
+      headers: { authorization: 'Bearer default-token' },
+      body: PNG,
+    })
+    assert.equal(res.status, 201, '空配置应回落到默认值而不是判为关闭')
+    const body = await res.json()
+    const ttlMs = new Date(body.expiresAt).getTime() - Date.now()
+    assert.ok(ttlMs > 23 * 3600 * 1000 && ttlMs < 25 * 3600 * 1000, `默认 TTL 应为 24h，实际 ${ttlMs}ms`)
+  } finally {
+    await app.close()
+  }
+})
 
 await test('没有令牌 → 401，且不回显任何内部信息', async () => {
   const app = await serve(baseConfig, 'secret-token-value', fakeAttachments())
@@ -184,7 +226,7 @@ await test('空 body → 400', async () => {
 })
 
 await test('超过体积上限 → 413', async () => {
-  const app = await serve({ ...baseConfig, maxIngestBytes: 32 }, 'tok', fakeAttachments())
+  const app = await serve({ ...baseConfig, ingestMaxBytes: 32 }, 'tok', fakeAttachments())
   try {
     const res = await fetch(app.url, {
       method: 'POST',
@@ -198,7 +240,7 @@ await test('超过体积上限 → 413', async () => {
 })
 
 await test('端点关闭 → 404', async () => {
-  const app = await serve({ ...baseConfig, enabled: false }, 'tok', fakeAttachments())
+  const app = await serve({ ...baseConfig, ingestEnabled: false }, 'tok', fakeAttachments())
   try {
     const res = await fetch(app.url, { method: 'POST', headers: { authorization: 'Bearer tok' }, body: PNG })
     assert.equal(res.status, 404)
@@ -209,7 +251,7 @@ await test('端点关闭 → 404', async () => {
 
 await test('条目上限生效：满了之后拒绝新图', async () => {
   await rm(join(home, 'vision-inbox'), { recursive: true, force: true })
-  const app = await serve({ ...baseConfig, maxInboxItems: 2 }, 'limit-tok', fakeAttachments())
+  const app = await serve({ ...baseConfig, ingestMaxItems: 2 }, 'limit-tok', fakeAttachments())
   try {
     for (let i = 0; i < 2; i += 1) {
       const res = await fetch(`${app.url}?name=f${i}.png`, {
@@ -228,7 +270,7 @@ await test('条目上限生效：满了之后拒绝新图', async () => {
 
 await test('同一张图重复推送 → 内容寻址去重，不额外占条目', async () => {
   await rm(join(home, 'vision-inbox'), { recursive: true, force: true })
-  const app = await serve({ ...baseConfig, maxInboxItems: 2 }, 'dup-tok', fakeAttachments())
+  const app = await serve({ ...baseConfig, ingestMaxItems: 2 }, 'dup-tok', fakeAttachments())
   try {
     const same = pngVariant(42)
     const first = await fetch(app.url, { method: 'POST', headers: { authorization: 'Bearer dup-tok' }, body: same })
