@@ -146,8 +146,96 @@ Each entry of `images` may be:
 
 ### `vision_list_images`
 
-No parameters. Lists every image attachment seen in this conversation (name, size, type, digest) so
-an agent staring at `[image omitted …]` still knows which images exist and how to name one.
+No parameters. Lists every image attachment seen in this conversation (name, size, type, digest), **plus
+whatever dev machines have pushed into the ingest inbox** (newest first, with push time and expiry), so an
+agent staring at `[image omitted …]` still knows which images exist and how to name one.
+
+> ⚠️ Inbox images are **not session events** — `latest` will not reach them. Name them by `sha256` digest.
+
+---
+
+## Pushing images from a dev machine
+
+Dev machines are many, variously configured, and constantly changing. Copying each image onto the host
+before analysing it meant redoing the same dance for every new machine. Now the host mounts one HTTP
+route: **any dev machine pushes the bytes with a single curl** — nothing to install, no port to open.
+
+### One push
+
+```bash
+# Same address you open the GUI on; the token lives in Settings → Plugins → Vision
+curl -T shot.png \
+  -H "Authorization: Bearer <token>" \
+  "http://<host>:3080/dsh-vision/ingest?name=shot.png"
+```
+
+```json
+{
+  "ok": true,
+  "id": "sha256:c414cd0e204d…",
+  "digest": "c414cd0e204d",
+  "mediaType": "image/png",
+  "width": 640,
+  "height": 480,
+  "expiresAt": "2026-10-23T05:23:23.773Z",
+  "usage": "vision_analyze images=[\"sha256:c414cd0e204d\"]"
+}
+```
+
+`usage` is a call you can hand straight to the agent. The bytes never enter the agent's context — only
+that one digest line does.
+
+### Endpoint contract
+
+| Item | Value |
+| --- | --- |
+| Path | `/dsh-vision/ingest`, same port as the GUI (3080 by default) |
+| Method | `POST` / `PUT`, **body is the raw image bytes** (not a form field, not a base64 string) |
+| Auth | `Authorization: Bearer <token>`, or `X-Vision-Token: <token>` |
+| Naming | `?name=shot.png`, optional, display only |
+| Formats | PNG / JPEG / WebP / GIF / BMP, decided by magic bytes (the `Content-Type` header is not trusted) |
+
+### Where the token comes from
+
+Generated on first boot into `~/.dsh/vision-inbox/token` (mode `0600`) and **reused across restarts**, so a
+dev machine hardcodes it once.
+
+| Status | Meaning |
+| --- | --- |
+| `201` | stored |
+| `401` | token missing or wrong (identical response for both, to prevent probing) |
+| `413` | over the per-request byte cap (32 MB by default) |
+| `415` | body is not a supported image |
+| `507` | inbox full (200 items by default) — sweep or raise the cap |
+| `404` | the endpoint is switched off in settings |
+
+### Why the service lives on the host, not the dev machine
+
+Because the thing that needs to *see* the image is the VLM the host talks to (`baseUrl` points at a public
+DashScope / Ark endpoint). Put the service on a dev machine and the host still has to pull it. Put it on
+the host and each dev machine pushes once. However many dev machines there are, only "who pushes" varies —
+"how it is received" stays in one place.
+
+### Storage and expiry
+
+- Bytes go through the existing attachment service (`attachments.saveImage`): content-addressed and
+  deduplicated — **pushing the same image twice does not cost a second inbox slot**.
+- Metadata lives in `~/.dsh/vision-inbox/items/` and expires after **24 hours** by default (swept every
+  10 minutes).
+- Expiry removes metadata only, **never the attachment object** — a conversation may still reference it.
+
+### Related settings
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| Ingest endpoint | on | Off makes the path answer 404 |
+| Retention (hours) | 24 | `ingestTtlHours` |
+| Per-request byte cap | 32 MB | `ingestMaxBytes` |
+| Inbox item cap | 200 | `ingestMaxItems`, answers 507 when full |
+
+> ⚠️ Port 3080 binds `0.0.0.0` with no platform-level authentication. Token checking, the byte cap and the
+> item cap are **all implemented inside this plugin**. Do not paste the token anywhere public; if in doubt,
+> switch the endpoint off.
 
 ### How images should reach the model (in the system prompt, and enforced at runtime)
 
@@ -263,7 +351,9 @@ npm run check   # syntax check + mirror-is-in-sync check + the full test suite
 - `catalog.js` — providers and capabilities, **the single source of truth**. Adding a provider means
   editing this file and running `npm run sync`.
 - `index.js` — the host half: two tools, the settings namespace, key resolution, image resolution,
-  and the live system-prompt section.
+  the live system-prompt section, and the mount point for the ingest endpoint.
+- `ingest.js` — the LAN ingest endpoint: token, byte and item caps, content-addressed storage, TTL sweep.
+  Self-contained; the only DSH dependency (`attachments`) is read optionally.
 - `client.js` — the browser half: the settings card and its `zh` / `en` dictionaries. A client bundle
   may not `import`, so the catalog is mirrored in by generation rather than imported.
 - `tests/session-images.test.mjs` — conversation image enumeration (the ground `latest` and digests
@@ -277,10 +367,14 @@ npm run check   # syntax check + mirror-is-in-sync check + the full test suite
 - `tests/client-card.test.cjs` — renders the card to static HTML with `react-dom/server` and asserts
   the official card structure, both languages, `zh`/`en` key parity, the collapsed advanced section,
   and the save/credential call sequence.
+- `tests/ingest.test.mjs` — the ingest endpoint: stands up a real http server and drives it with real
+  requests, covering token check (missing and wrong answer identically), methods, formats, the byte cap,
+  the item cap, content-addressed dedup, TTL sweeping, corrupt-metadata tolerance, and token persistence.
 
-All three skip cleanly (exit 0) when their dependencies are absent: `index.js` needs
-`@deepseek-ai/schemastery`, and the card test needs `react` / `react-dom` (injected by the DSH platform
-in the browser; locally they resolve from the DSH profile's `node_modules`).
+`ingest.test.mjs` needs only `node:*`, so it **always runs**; the other three skip cleanly (exit 0) when
+their dependencies are absent: `index.js` needs `@deepseek-ai/schemastery`, and the card test needs
+`react` / `react-dom` (injected by the DSH platform in the browser; locally they resolve from the DSH
+profile's `node_modules`).
 
 ### Working without a real key
 

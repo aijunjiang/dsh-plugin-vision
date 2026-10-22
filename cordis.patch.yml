@@ -6,5 +6,7 @@
     - id: vision
       name: dsh-plugin-vision
       config:
-        provider: ark
-        apiKeyEnv: ARK_API_KEY
+        # 默认供应商。用户已有的 settings.yaml 会覆盖这里的值；这里只决定全新安装时的起点。
+        # 选 dashscope 是因为它开箱支持图片/视频输入，且本机已在用的就是它。
+        provider: dashscope
+        apiKeyEnv: DASHSCOPE_API_KEY

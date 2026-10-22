@@ -16,6 +16,7 @@ import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
 import { CAPABILITIES, DEFAULT_PROVIDER, PROVIDERS, capabilityById, providerById } from './catalog.js'
+import { INGEST_PATH, loadOrCreateToken, listInbox, makeIngestRoute, startSweeper } from './ingest.js'
 
 /** Cordis 插件名（loader 诊断用）。 */
 export const name = 'vision'
@@ -53,6 +54,11 @@ export const Config = z.object({
   maxImages: z.number().step(1).min(1).max(16).default(DEFAULT_MAX_IMAGES),
   maxImageBytes: z.number().step(1).min(65536).max(67108864).default(DEFAULT_MAX_IMAGE_BYTES),
   extraBody: z.string().default(''),
+  // ── 局域网接收端点（开发机推图）────────────────────────────────────────
+  ingestEnabled: z.boolean().default(true),
+  ingestTtlHours: z.number().step(1).min(1).max(720).default(24),
+  ingestMaxBytes: z.number().step(1).min(65536).max(67108864).default(32 * 1024 * 1024),
+  ingestMaxItems: z.number().step(1).min(1).max(5000).default(200),
 })
 
 /**
@@ -83,6 +89,10 @@ export function withDefaults(config) {
     maxImages: int(c.maxImages, DEFAULT_MAX_IMAGES),
     maxImageBytes: int(c.maxImageBytes, DEFAULT_MAX_IMAGE_BYTES),
     extraBody: typeof c.extraBody === 'string' ? c.extraBody : '',
+    ingestEnabled: typeof c.ingestEnabled === 'boolean' ? c.ingestEnabled : true,
+    ingestTtlHours: int(c.ingestTtlHours, 24),
+    ingestMaxBytes: int(c.ingestMaxBytes, 32 * 1024 * 1024),
+    ingestMaxItems: int(c.ingestMaxItems, 200),
   }
 }
 
@@ -637,7 +647,10 @@ async function resolveImageSpec(ctx, exec, spec, cfg, depth = 0) {
         label: `附件对象 ${found.id.slice(0, 19)}…（${found.mediaType}，${found.bytes.length} 字节）`,
       }]
     }
-    throw new Error(`按摘要 ${hex} 没找到附件对象；用 vision_list_images 确认可用的图片`)
+    throw new Error(
+      `按摘要 ${hex} 没找到附件对象；用 vision_list_images 确认可用的图片`
+      + '（它会列出会话附件和接收端点 inbox 里由开发机推送上来的图）',
+    )
   }
 
   const path = raw.replace(/^file:\/\//iu, '')
@@ -691,8 +704,75 @@ export function apply(ctx, entry) {
     promptCtx.systemPrompt.section({
       name: 'tool:vision_analyze',
       order: PROMPT_SECTION_ORDER,
-      text: () => buildPromptSection(current()),
+      text: () => {
+        const cfg = current()
+        const base = buildPromptSection(cfg)
+        if (!cfg.ingestEnabled) return base
+        // 接收端点开着时，告诉 agent 开发机推上来的图怎么取——否则它只会想到传路径。
+        return `${base}\n`
+          + '另外：开发机可以把图片直接推送到本机的接收端点（局域网内多台机器都适用，不需要先拷文件）。'
+          + `推上来的图会以 sha256 摘要入库，用 images:["sha256:<摘要>"] 或 images:["latest"] 就能分析它；`
+          + '不确定有哪些时，先用 vision_list_images 看一眼（它会列出 inbox 里待分析的图）。'
+          + '当用户说「图已经传上去了 / 我推了张图」，直接列 inbox，不要让用户再给一次路径。'
+      },
     })
+  })
+
+  // ── 局域网接收端点：开发机把图片推上来，agent 再分析 ────────────────────
+  // 3080 绑 0.0.0.0 且平台层无鉴权，token / 体积 / 条目上限全部在 ingest.js 里自管。
+  let ingestToken = ''
+  ctx.inject(['webServer'], (webCtx) => {
+    let stopSweeper = null
+    void (async () => {
+      try {
+        ingestToken = await loadOrCreateToken()
+      } catch (error) {
+        ctx.logger?.warn?.(`[vision] 无法创建接收令牌：${String((error && error.message) || error)}`)
+        return
+      }
+      const dispose = webCtx.webServer.register(makeIngestRoute(ctx, {
+        config: () => current(),
+        token: () => ingestToken,
+      }))
+      webCtx.effect(() => () => {
+        dispose()
+        if (stopSweeper !== null) stopSweeper()
+      })
+      stopSweeper = startSweeper(10 * 60 * 1000)
+      ctx.logger?.info?.(`[vision] 局域网接收端点已挂载：${INGEST_PATH}`)
+    })()
+  })
+
+  // 设置卡片读完这段就能显示「端点地址 + 令牌 + 一条可直接复制的 curl」。
+  // authority 定为 loopback：只有本机的界面能读，局域网里其他机器读不到。
+  ctx.inject(['connection'], (connCtx) => {
+    const rpc = connCtx.connection && connCtx.connection.rpc
+    if (!rpc || typeof rpc.handle !== 'function') return
+    const dispose = rpc.handle('/dsh-vision', async (endpoint) => {
+      if (endpoint === 'ingest.info') {
+        const cfg = current()
+        let inbox = []
+        try {
+          inbox = await listInbox()
+        } catch {
+          inbox = []
+        }
+        return {
+          ok: true,
+          value: {
+            enabled: cfg.ingestEnabled,
+            path: INGEST_PATH,
+            token: ingestToken,
+            ttlHours: cfg.ingestTtlHours,
+            maxBytes: cfg.ingestMaxBytes,
+            maxItems: cfg.ingestMaxItems,
+            inboxCount: inbox.length,
+          },
+        }
+      }
+      return { ok: false, error: { code: 'bad-request', message: `unknown endpoint ${endpoint}` } }
+    }, { authority: 'loopback' })
+    connCtx.effect(() => () => dispose())
   })
 
   /** 解析本轮调用使用的 API Key：设置字段 → 凭据域 → 环境变量。 */
@@ -946,21 +1026,56 @@ export function apply(ctx, entry) {
     isConcurrencySafe: () => true,
     async execute(_args, exec) {
       const refs = sessionImageRefs(exec)
+      const lines = []
+
       if (refs.length === 0) {
-        return '当前会话没有检测到任何图片附件。让用户在输入框里上传图片，或给出本地路径 / URL 后再调用 vision_analyze。'
+        lines.push('当前会话没有检测到任何图片附件。')
+      } else {
+        lines.push(`当前会话共 ${refs.length} 张图片附件（旧 → 新，最后一张即 "latest"）：`)
+        refs.forEach((ref, index) => {
+          const hex = String(ref.attachmentId).replace(/^sha256:/u, '')
+          const parts = []
+          if (ref.name !== undefined) parts.push(`名称 "${ref.name}"`)
+          if (ref.width !== undefined && ref.height !== undefined) parts.push(`${ref.width}x${ref.height}px`)
+          if (ref.mediaType !== undefined) parts.push(String(ref.mediaType))
+          if (ref.bytes !== undefined) parts.push(`${ref.bytes} 字节`)
+          lines.push(`[${index + 1}] sha256:${hex.slice(0, 12)}  ${parts.join(' | ')}`)
+        })
       }
-      const lines = [`当前会话共 ${refs.length} 张图片附件（旧 → 新，最后一张即 "latest"）：`]
-      refs.forEach((ref, index) => {
-        const hex = String(ref.attachmentId).replace(/^sha256:/u, '')
-        const parts = []
-        if (ref.name !== undefined) parts.push(`名称 "${ref.name}"`)
-        if (ref.width !== undefined && ref.height !== undefined) parts.push(`${ref.width}x${ref.height}px`)
-        if (ref.mediaType !== undefined) parts.push(String(ref.mediaType))
-        if (ref.bytes !== undefined) parts.push(`${ref.bytes} 字节`)
-        lines.push(`[${index + 1}] sha256:${hex.slice(0, 12)}  ${parts.join(' | ')}`)
-      })
+
+      // inbox：开发机通过接收端点点对点推上来的图，不在会话事件里，必须单独列。
+      const cfg = current()
+      if (cfg.ingestEnabled) {
+        let inbox = []
+        try {
+          inbox = await listInbox()
+        } catch {
+          inbox = []
+        }
+        if (inbox.length > 0) {
+          lines.push('')
+          lines.push(`接收端点 inbox：另有 ${inbox.length} 张由开发机推送上来的图（新 → 旧）：`)
+          inbox.slice(0, 30).forEach((item, index) => {
+            const hex = String(item.id).replace(/^sha256:/u, '')
+            const parts = []
+            if (item.name !== undefined && item.name !== '') parts.push(`名称 "${item.name}"`)
+            if (item.width !== undefined && item.height !== undefined) parts.push(`${item.width}x${item.height}px`)
+            if (item.mediaType !== undefined) parts.push(String(item.mediaType))
+            if (item.bytes !== undefined) parts.push(`${item.bytes} 字节`)
+            const mins = Math.max(0, Math.round((Date.now() - (item.receivedAt || Date.now())) / 60000))
+            parts.push(`${mins} 分钟前推送`)
+            lines.push(`[inbox ${index + 1}] sha256:${hex.slice(0, 12)}  ${parts.join(' | ')}`)
+          })
+          if (inbox.length > 30) lines.push(`（只列了最新 30 张，共 ${inbox.length} 张）`)
+        } else {
+          lines.push('')
+          lines.push('接收端点 inbox：目前没有待分析的推送图片。')
+        }
+      }
+
       lines.push('')
       lines.push('用法：vision_analyze images=["sha256:<上面的摘要>"] 或 images=["latest"]，prompt 由你自己撰写。')
+      lines.push('注意：inbox 里的图不在会话事件里，"latest" 取不到它们——必须用 sha256 摘要点名。')
       return lines.join('\n')
     },
   })

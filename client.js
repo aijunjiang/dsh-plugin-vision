@@ -431,6 +431,21 @@ window.__ModuleLoader__.load({
       savedOk: '设置已保存。',
       savedOkWithKey: '设置已保存，密钥已写入凭据 {ref}。',
       docs: '接口文档',
+      ingest: '推图端点',
+      ingestOn: '已开启',
+      ingestOff: '已关闭',
+      ingestHint: '开发机把图片按原始字节 POST 到这个端点即可入库，不需要先拷到本机磁盘。',
+      ingestTtl: '保留时长（小时）',
+      ingestTtlHint: '超时后条目会被清理；清理只删元数据，不会删掉会话里还在引用的附件。',
+      ingestEndpoint: '端点信息',
+      ingestUrl: '地址',
+      ingestToken: '令牌',
+      ingestInbox: '待分析',
+      ingestUsageHint: '开发机上执行下面这条命令即可推图；返回里的 usage 可以直接交给 agent。',
+      ingestCurl: '推图命令',
+      ingestDisabled: '推图端点已关闭，该路径会返回 404。',
+      show: '显示',
+      hide: '隐藏',
     }
 
     var EN = {
@@ -483,6 +498,21 @@ window.__ModuleLoader__.load({
       savedOk: 'Settings saved.',
       savedOkWithKey: 'Settings saved; the key was written to credential {ref}.',
       docs: 'API docs',
+      ingest: 'Image ingest endpoint',
+      ingestOn: 'Enabled',
+      ingestOff: 'Disabled',
+      ingestHint: 'Dev machines POST raw image bytes here; no copying the file onto this host first.',
+      ingestTtl: 'Retention (hours)',
+      ingestTtlHint: 'Items are swept after this window. Sweeping removes metadata only — attachments a conversation still references are kept.',
+      ingestEndpoint: 'Endpoint',
+      ingestUrl: 'URL',
+      ingestToken: 'Token',
+      ingestInbox: 'Pending',
+      ingestUsageHint: 'Run this on a dev machine to push an image; the returned usage goes straight to the agent.',
+      ingestCurl: 'Push command',
+      ingestDisabled: 'The ingest endpoint is off; this path answers 404.',
+      show: 'Show',
+      hide: 'Hide',
     }
 
     /** 部署缺少 locale 服务时的兜底：按浏览器语言选词典。 */
@@ -603,6 +633,29 @@ window.__ModuleLoader__.load({
         color: 'var(--dsw-alias-label-success, #16a34a)',
       },
       chips: { display: 'flex', flexWrap: 'wrap', gap: '8px' },
+      toggleRow: { display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px' },
+      infoBox: { display: 'flex', flexDirection: 'column', gap: '8px' },
+      infoLine: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
+      infoKey: { fontSize: '12px', color: 'var(--dsw-alias-label-tertiary, #999)', minWidth: '72px' },
+      infoValue: { fontSize: '13px' },
+      code: {
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+        fontSize: '12px', padding: '2px 6px', borderRadius: '6px',
+        background: 'var(--dsw-alias-bg-layer-1, rgba(128,128,128,.12))',
+        color: 'var(--dsw-alias-label-primary, inherit)', wordBreak: 'break-all',
+      },
+      pre: {
+        margin: 0, padding: '10px 12px', borderRadius: '8px', overflowX: 'auto',
+        background: 'var(--dsw-alias-bg-layer-1, rgba(128,128,128,.12))',
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+        fontSize: '12px', lineHeight: 1.6, whiteSpace: 'pre',
+        color: 'var(--dsw-alias-label-primary, inherit)',
+      },
+      miniButton: {
+        padding: '2px 8px', borderRadius: '6px', cursor: 'pointer', fontSize: '12px',
+        border: '1px solid var(--dsw-alias-border-l2, #555)',
+        background: 'transparent', color: 'inherit', font: 'inherit',
+      },
       chip: {
         display: 'inline-flex', alignItems: 'center', gap: '6px',
         padding: '4px 10px', borderRadius: '999px', cursor: 'pointer',
@@ -694,6 +747,12 @@ window.__ModuleLoader__.load({
       var noticeState = useState(null)
       var notice = noticeState[0]
       var setNotice = noticeState[1]
+      var ingestState = useState(null)
+      var ingest = ingestState[0]
+      var setIngest = ingestState[1]
+      var tokenShownState = useState(false)
+      var tokenShown = tokenShownState[0]
+      var setTokenShown = tokenShownState[1]
 
       // 外部（其它界面/宿主）改动设置时，未编辑状态下跟随刷新
       useEffect(function () {
@@ -708,6 +767,16 @@ window.__ModuleLoader__.load({
       var allowKeyWrite = cred.writable
       var keyDirty = keyText !== ''
       var staged = dirty || keyDirty
+
+      /** 推图端点的运行期信息：地址、令牌、inbox 条数。宿主不可达时安静失败。 */
+      function loadIngest() {
+        if (!props.fetchIngestInfo) return
+        props.fetchIngestInfo().then(function (info) {
+          if (info) setIngest(info)
+        }).catch(function () {
+          // 宿主没挂通道或本机不可达：不显示这个区块，不打扰用户
+        })
+      }
 
       function patch(next) {
         setDirty(true)
@@ -928,8 +997,73 @@ window.__ModuleLoader__.load({
             function (v) { patch({ apiKeyEnv: v }) }, locked),
           t('keyRefHint')))
 
+        // ── 推图端点设置 ────────────────────────────────────────────────
+        fields.push(field('vision-ingest-enabled', false, t('ingest'), null,
+          createElement('label', { style: css.toggleRow, htmlFor: 'vision-ingest-enabled' },
+            createElement('input', {
+              id: 'vision-ingest-enabled',
+              type: 'checkbox',
+              checked: draft.ingestEnabled !== false,
+              disabled: locked,
+              onChange: function (e) { patch({ ingestEnabled: e.target.checked }) },
+            }),
+            createElement('span', null, draft.ingestEnabled !== false ? t('ingestOn') : t('ingestOff')),
+          ),
+          t('ingestHint')))
+
+        fields.push(field('vision-ingest-ttl', false, t('ingestTtl'), null,
+          textInput('vision-ingest-ttl', String(draft.ingestTtlHours), '24',
+            function (v) { patch({ ingestTtlHours: v.replace(/[^0-9]/g, '') }) }, locked),
+          t('ingestTtlHint')))
+
         if (preset.docs) {
           fields.push(createElement('p', { style: css.hint, key: 'vision-docs' }, t('docs') + '：' + preset.docs))
+        }
+      }
+
+      // 推图端点的运行期信息（地址 + 令牌 + 现成 curl），只在区块展开时向宿主取。
+      if (ingest === null && open) loadIngest()
+      if (ingest !== null) {
+        var origin = ''
+        try {
+          if (typeof window !== 'undefined' && window.location) origin = window.location.origin
+        } catch (err) {
+          origin = ''
+        }
+        var ingestUrl = origin + ingest.path
+        fields.push(field('vision-ingest-info', false, t('ingestEndpoint'), null,
+          createElement('div', { style: css.infoBox },
+            ingest.enabled
+              ? createElement('div', { style: css.infoLine },
+                  createElement('span', { style: css.infoKey }, t('ingestUrl')),
+                  createElement('code', { style: css.code }, ingestUrl))
+              : createElement('p', { style: css.hint }, t('ingestDisabled')),
+            ingest.enabled
+              ? createElement('div', { style: css.infoLine },
+                  createElement('span', { style: css.infoKey }, t('ingestToken')),
+                  createElement('code', { style: css.code },
+                    tokenShown ? ingest.token : '••••••••••••••••'),
+                  createElement('button', {
+                    type: 'button',
+                    style: css.miniButton,
+                    onClick: function () { setTokenShown(!tokenShown) },
+                  }, tokenShown ? t('hide') : t('show')),
+                )
+              : null,
+            ingest.enabled
+              ? createElement('div', { style: css.infoLine },
+                  createElement('span', { style: css.infoKey }, t('ingestInbox')),
+                  createElement('span', { style: css.infoValue }, String(ingest.inboxCount)))
+              : null,
+          ),
+          ingest.enabled ? t('ingestUsageHint') : null))
+
+        if (ingest.enabled) {
+          var curl = 'curl -T shot.png -H "Authorization: Bearer ' + ingest.token + '" \\\n'
+            + '  "' + ingestUrl + '?name=shot.png"'
+          fields.push(field('vision-ingest-curl', false, t('ingestCurl'), null,
+            createElement('pre', { style: css.pre }, curl),
+            null))
         }
       }
 
@@ -1136,6 +1270,23 @@ window.__ModuleLoader__.load({
         })
       }
 
+      /**
+       * 向宿主取推图端点的运行期信息。
+       * 通道仅 loopback 开放，通过 /dsh-vision JSON-RPC 读；不可达时返回 null，卡片安静地不显示该区块。
+       */
+      function fetchIngestInfo() {
+        var connection = ctx.get('connection')
+        if (!connection || !connection.rpc || typeof connection.rpc.call !== 'function') {
+          return Promise.resolve(null)
+        }
+        return connection.rpc.call('/dsh-vision', 'ingest.info', {}).then(function (res) {
+          if (!res || !res.ok || !res.value) return null
+          return res.value
+        }).catch(function () {
+          return null
+        })
+      }
+
       var store = {
         getSnapshot: function () { return latest },
         subscribe: function (listener) {
@@ -1158,6 +1309,7 @@ window.__ModuleLoader__.load({
               saveKey: saveKey,
               clearKey: clearKey,
               refreshCredential: refreshCredential,
+              fetchIngestInfo: fetchIngestInfo,
             }
           },
         }
