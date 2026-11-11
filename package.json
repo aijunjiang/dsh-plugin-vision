@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-vision",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "给 DSH agent 装一双眼睛：调用在线 VLM（多供应商、OpenAI 兼容）分析本地图片、URL 与会话上传的附件；勾选的模型特色能力会实时注入系统提示",
   "type": "module",
   "main": "index.js",
@@ -48,10 +48,18 @@
     "@deepseek-ai/dsh-tools": "*"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/cordis": { "optional": true },
-    "@deepseek-ai/schemastery": { "optional": true },
-    "@deepseek-ai/dsh-settings": { "optional": true },
-    "@deepseek-ai/dsh-tools": { "optional": true }
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-settings": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
   },
   "dsh": {
     "client": {
