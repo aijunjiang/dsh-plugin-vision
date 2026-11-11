@@ -80,7 +80,10 @@ are *not* hot-reloaded — the module stays in the ESM cache, so restart `dsh we
 
 ## Configure
 
-Settings → Plugins → **Vision**.
+Sidebar **Plugins** → click `dsh-plugin-vision` under Installed → the configuration block on the bundle page.
+
+> Since DSH 0.2.x the configuration lives in the **Plugins view in the sidebar**; the
+> Settings page's "built-in plugins" list is read-only.
 
 | Field | Meaning |
 | --- | --- |
@@ -163,7 +166,7 @@ route: **any dev machine pushes the bytes with a single curl** — nothing to in
 ### One push
 
 ```bash
-# Same address you open the GUI on; the token lives in Settings → Plugins → Vision
+# Same address you open the GUI on; the token lives in the Plugins view → dsh-plugin-vision
 curl -T shot.png \
   -H "Authorization: Bearer <token>" \
   "http://<host>:3080/dsh-vision/ingest?name=shot.png"

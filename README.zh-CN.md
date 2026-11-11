@@ -75,7 +75,9 @@ web profile 是 live-reload：保存补丁文件，**配置改动**（供应商�
 
 ## 配置
 
-设置 → 插件 → **视觉能力**。
+侧栏「插件」→ 已安装插件里点 `dsh-plugin-vision` → 包详情页的配置区。
+
+> DSH 0.2.x 起配置页在**侧栏插件页**（设置页里的「内置插件」只是只读清单）。
 
 | 项 | 说明 |
 | --- | --- |
@@ -156,7 +158,7 @@ web profile 是 live-reload：保存补丁文件，**配置改动**（供应商�
 ### 一次推送
 
 ```bash
-# 宿主机地址就是你打开 GUI 的那个地址；令牌见「设置 → 插件 → 视觉能力 → 推图端点」
+# 宿主机地址就是你打开 GUI 的那个地址；令牌见「侧栏插件 → dsh-plugin-vision → 推图端点」
 curl -T shot.png \
   -H "Authorization: Bearer <token>" \
   "http://<宿主机>:3080/dsh-vision/ingest?name=shot.png"

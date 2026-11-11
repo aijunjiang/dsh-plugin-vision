@@ -27,7 +27,7 @@ export { mergeLatestSources }
 export const name = 'vision'
 
 /** 硬依赖：注册工具与配置命名空间。fs / attachments / systemPrompt / credentials 走可选读取。 */
-export const inject = ['tools', 'settings']
+export const inject = ['tools']
 
 /** 设置命名空间（客户端卡片按此 key 配对）。 */
 export const VISION_NS = 'vision'
@@ -46,36 +46,36 @@ const PROMPT_SECTION_ORDER = 3050
 
 /** 行级默认配置（可被设置命名空间用户层逐字段覆盖）。 */
 export const Config = z.object({
-  provider: z.string().default(DEFAULT_PROVIDER),
-  baseUrl: z.string().default(''),
-  model: z.string().default(''),
-  apiKey: z.string().role('secret'),
-  apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_KEY_ENV),
-  capabilities: z.array(z.string()).default([]),
-  detail: z.string().default('auto'),
-  thinking: z.string().default('default'),
-  maxTokens: z.number().step(1).min(64).max(32768).default(DEFAULT_MAX_TOKENS),
-  timeoutMs: z.number().step(1).min(5000).max(600000).default(DEFAULT_TIMEOUT_MS),
-  maxImages: z.number().step(1).min(1).max(16).default(DEFAULT_MAX_IMAGES),
-  maxImageBytes: z.number().step(1).min(65536).max(67108864).default(DEFAULT_MAX_IMAGE_BYTES),
-  extraBody: z.string().default(''),
+  provider: z.string().default(DEFAULT_PROVIDER).volatile(),
+  baseUrl: z.string().default('').volatile(),
+  model: z.string().default('').volatile(),
+  apiKey: z.string().role('secret').volatile(),
+  apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_KEY_ENV).volatile(),
+  capabilities: z.array(z.string()).default([]).volatile(),
+  detail: z.string().default('auto').volatile(),
+  thinking: z.string().default('default').volatile(),
+  maxTokens: z.number().step(1).min(64).max(32768).default(DEFAULT_MAX_TOKENS).volatile(),
+  timeoutMs: z.number().step(1).min(5000).max(600000).default(DEFAULT_TIMEOUT_MS).volatile(),
+  maxImages: z.number().step(1).min(1).max(16).default(DEFAULT_MAX_IMAGES).volatile(),
+  maxImageBytes: z.number().step(1).min(65536).max(67108864).default(DEFAULT_MAX_IMAGE_BYTES).volatile(),
+  extraBody: z.string().default('').volatile(),
   // ── 局域网接收端点（开发机推图）────────────────────────────────────────
-  ingestEnabled: z.boolean().default(true),
-  ingestTtlHours: z.number().step(1).min(1).max(720).default(24),
-  ingestMaxBytes: z.number().step(1).min(65536).max(67108864).default(32 * 1024 * 1024),
-  ingestMaxItems: z.number().step(1).min(1).max(5000).default(200),
+  ingestEnabled: z.boolean().default(true).volatile(),
+  ingestTtlHours: z.number().step(1).min(1).max(720).default(24).volatile(),
+  ingestMaxBytes: z.number().step(1).min(65536).max(67108864).default(32 * 1024 * 1024).volatile(),
+  ingestMaxItems: z.number().step(1).min(1).max(5000).default(200).volatile(),
   // ── OSS 中转（第三级通道：局域网互不可达时用）──────────────────────────
-  ossEnabled: z.boolean().default(false),
-  ossAccessKeyId: z.string().default(''),
-  ossAccessKeySecret: z.string().role('secret').default(''),
-  ossBucket: z.string().default(''),
-  ossEndpoint: z.string().default(''),
-  ossPublicBase: z.string().default(''),
-  ossExpireSeconds: z.number().step(1).min(60).max(86400).default(900),
+  ossEnabled: z.boolean().default(false).volatile(),
+  ossAccessKeyId: z.string().default('').volatile(),
+  ossAccessKeySecret: z.string().role('secret').default('').volatile(),
+  ossBucket: z.string().default('').volatile(),
+  ossEndpoint: z.string().default('').volatile(),
+  ossPublicBase: z.string().default('').volatile(),
+  ossExpireSeconds: z.number().step(1).min(60).max(86400).default(900).volatile(),
   // ── OSS 用完即删 ──────────────────────────────────────────────────────
   // 分析成功后把对象删掉。延迟是为了让「换个 prompt 再问一次」不至于立刻 404。
-  ossDeleteAfterAnalyze: z.boolean().default(true),
-  ossDeleteDelaySeconds: z.number().step(1).min(0).max(86400).default(300),
+  ossDeleteAfterAnalyze: z.boolean().default(true).volatile(),
+  ossDeleteDelaySeconds: z.number().step(1).min(0).max(86400).default(300).volatile(),
 })
 
 /**
@@ -854,16 +854,21 @@ function readHttpError(error) {
 }
 
 export function apply(ctx, entry) {
-  let current = () => withDefaults(entry)
-
-  ctx.inject(['settings'], (settingsCtx) => {
-    settingsCtx.settings.installSection(ctx, VISION_NS, Config, withDefaults(entry), {
-      setSource(source) {
-        current = () => withDefaults(source())
-      },
-      onChange() {},
-    })
-  })
+  // DSH 0.2.x：ctx.settings.installSection 已移除。volatile 字段由框架注入为
+  // 取值句柄（含 get()），配置表单按 entry.id 自动生成并挂到侧栏插件页。
+  // 这里先把句柄解包成普通值，交给原 withDefaults 复用全部校验逻辑。
+  const unwrap = (config) => {
+    if (config === null || typeof config !== 'object') return {}
+    const out = {}
+    for (const key of Object.keys(config)) {
+      const value = config[key]
+      out[key] = (value !== null && typeof value === 'object' && typeof value.get === 'function')
+        ? value.get()
+        : value
+    }
+    return out
+  }
+  const current = () => withDefaults(unwrap(entry))
 
   // 提示词随设置实时变化：text 是函数，每次装配系统提示都会重新求值。
   ctx.inject(['systemPrompt'], (promptCtx) => {
