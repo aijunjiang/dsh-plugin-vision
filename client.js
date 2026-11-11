@@ -1255,7 +1255,10 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
-      var scope = ctx.settingsScope.bind({ namespace: NS })
+      // DSH 0.2.x：settingsScope 服务已由 configForms 取代。
+      // 0.1.x 的 ctx.settingsScope.bind({ namespace }) → 0.2.x 的 ctx.configForms.get(namespace)
+      // 返回的 ConfigForm<T> 与原 SettingsScope<T> 的 getSnapshot/subscribe/mutate/set/unset 签名一致。
+      var scope = ctx.configForms.get(NS)
 
       // 词典注册进宿主的 locale 服务：注册成功后，槽位声明 locale: LOCALE_NS，
       // 渲染机制会合成 t 这个标准 prop，并在用户切换语言时自动重渲。
@@ -1436,10 +1439,19 @@ window.__ModuleLoader__.load({
         },
       }
 
-      ctx.slots.inject('settings.plugin.item', function* registerCard() {
+      // DSH 0.2.x：settings.plugin.item（单卡片）槽位已移除，
+      // 改为在「设置 → 插件」分区里贡献一个标签页：settings.plugins.tab（list 类型）。
+      // list 类型要求 id，可选 order（标签顺序）与 label（本地化标签，thunk 随语言重算）。
+      // label 走 localeService 的 t（词典注册成功时），否则退回自带 FALLBACK_T。
+      var tabT = (localeReady && typeof localeService.bind === 'function')
+        ? localeService.bind(LOCALE_NS)
+        : FALLBACK_T
+      ctx.slots.inject('settings.plugins.tab', function* registerCard() {
         var registration = {
-          name: 'settings.plugin.item',
-          key: NS,
+          name: 'settings.plugins.tab',
+          id: NS,
+          order: 40,
+          label: function () { return tabT('title') },
           inject: function () {
             return {
               hooks: { visionCard: store },
@@ -1456,9 +1468,31 @@ window.__ModuleLoader__.load({
         if (localeReady) registration.locale = LOCALE_NS
         yield ctx.slots.register(registration, VisionCard)
       })
+
+      // ── 侧栏插件页的配置入口（DSH 0.2.x）────────────────────────────────
+      // plugins.bundle.config 的 key = bundle **包名**（不是行 id）。
+      // 表单命名空间是行 id —— 上面的 ctx.configForms.get(NS) 里 NS='vision' 即行 id。
+      ctx.slots.inject('plugins.bundle.config', function* registerBundleConfig() {
+        var bundleRegistration = {
+          name: 'plugins.bundle.config',
+          key: 'dsh-plugin-vision',
+          inject: function () {
+            return {
+              hooks: { visionCard: store },
+              saveSettings: saveSettings,
+              saveKey: saveKey,
+              clearKey: clearKey,
+              refreshCredential: refreshCredential,
+              fetchIngestInfo: fetchIngestInfo,
+            }
+          },
+        }
+        if (localeReady) bundleRegistration.locale = LOCALE_NS
+        yield ctx.slots.register(bundleRegistration, VisionCard)
+      })
     }
 
-    exports.inject = ['slots', 'settingsScope', 'remote', 'remote.credentials']
+    exports.inject = ['slots', 'configForms', 'remote', 'remote.credentials']
     exports.apply = apply
     return module.exports
   },
